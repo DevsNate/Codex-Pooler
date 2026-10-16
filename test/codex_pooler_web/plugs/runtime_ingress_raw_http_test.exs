@@ -114,18 +114,77 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngressRawHTTPTest do
     assert_no_gateway_side_effects(ctx.upstream)
   end
 
-  @tag :capture_log
-  test "absolute-form single comma-valued or absent Host fields retain adapter behavior", ctx do
-    for host_fields <- [[], [{"Host", "example.com, example.net"}]] do
-      response = raw_request(ctx, "POST", request_target(:absolute, "/v1/responses"), [{"x-forwarded-for", "198.51.100.20"}], host_fields: host_fields)
+  for {label, host_fields} <- [{"absent", []}, {"invalid", [{"Host", "example.com, example.net"}]}],
+      form <- [:origin, :absolute] do
+    @tag :capture_log
+    test "#{form} rejects #{label} Host before endpoint dispatch", ctx do
+      response = raw_request(ctx, "POST", request_target(unquote(form), "/v1/responses"), [{"x-forwarded-for", "198.51.100.20"}], host_fields: unquote(Macro.escape(host_fields)))
 
-      assert response.status == 401
-      assert json_field(response, ["error", "code"]) == "api_key_missing"
+      assert response.status == 400
+      refute List.keymember?(response.headers, "x-request-id", 0)
+      assert_no_gateway_side_effects(ctx.upstream)
     end
+  end
 
-    response = raw_request(ctx, "POST", "/v1/responses", [], host_fields: [])
+  for authority <- ["example.com@example.net", "ex#ample.com", "[invalid::1]", "example.com:65536"],
+      form <- [:origin, :absolute] do
+    @tag :capture_log
+    test "#{form} rejects malformed authority #{authority} before endpoint dispatch", ctx do
+      {target, host_fields} =
+        case unquote(form) do
+          :origin -> {"/v1/responses", [{"Host", unquote(authority)}]}
+          :absolute -> {"http://#{unquote(authority)}/v1/responses", [{"Host", "example.com"}]}
+        end
+
+      response = raw_request(ctx, "POST", target, [{"x-forwarded-for", "198.51.100.20"}], host_fields: host_fields)
+
+      assert response.status == 400
+      refute List.keymember?(response.headers, "x-request-id", 0)
+      assert_no_gateway_side_effects(ctx.upstream)
+    end
+  end
+
+  @tag :capture_log
+  test "malformed absolute authority rejects an authenticated incomplete body before reading it", ctx do
+    headers = [
+      {"authorization", ctx.gateway.authorization},
+      {"x-forwarded-for", "198.51.100.20"},
+      {"content-type", "application/json"}
+    ]
+
+    response = raw_request(ctx, "POST", "http://example.com@example.net/v1/responses", headers, content_length: 100)
+
     assert response.status == 400
+    refute List.keymember?(response.headers, "x-request-id", 0)
     assert_no_gateway_side_effects(ctx.upstream)
+  end
+
+  for route <- ["/login", "/v1/responses"] do
+    @tag :capture_log
+    test "malformed JSON on #{route} retains its error response after reading the body", ctx do
+      headers = [
+        {"authorization", ctx.gateway.authorization},
+        {"x-forwarded-for", "198.51.100.20"},
+        {"content-type", "application/json"},
+        {"accept", "application/json"}
+      ]
+
+      response = raw_request(ctx, "POST", unquote(route), headers, body: "{")
+
+      assert response.status == 400
+
+      case unquote(route) do
+        "/login" ->
+          assert json_field(response, ["errors", "detail"]) == "Bad Request"
+
+        "/v1/responses" ->
+          assert List.keymember?(response.headers, "x-request-id", 0)
+          assert json_field(response, ["error", "code"]) == "invalid_request"
+          assert json_field(response, ["error", "message"]) == "request body could not be parsed"
+      end
+
+      assert_no_gateway_side_effects(ctx.upstream)
+    end
   end
 
   @tag :capture_log
@@ -234,7 +293,8 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngressRawHTTPTest do
 
     assert response.status == 400
     refute List.keymember?(response.headers, "x-request-id", 0)
-    if form == :absolute, do: assert(response.body == "Bad Request")
+    assert response.body == ""
+    assert {"content-length", " 0"} in response.headers
     assert_no_gateway_side_effects(ctx.upstream)
   end
 
@@ -265,6 +325,7 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngressRawHTTPTest do
       )
 
     Agent.update(ctx.sockets, &MapSet.put(&1, socket))
+    body = Keyword.get(opts, :body, "")
 
     request = [
       method,
@@ -274,10 +335,11 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngressRawHTTPTest do
       Enum.map(Keyword.get(opts, :host_fields, [{"host", "127.0.0.1:#{ctx.port}"}]), fn {name, value} -> [name, ": ", value, "\r\n"] end),
       Enum.map(headers, fn {name, value} -> [name, ": ", value, "\r\n"] end),
       "content-length: ",
-      Integer.to_string(Keyword.get(opts, :content_length, 0)),
+      Integer.to_string(Keyword.get(opts, :content_length, byte_size(body))),
       "\r\n",
       if(List.keymember?(headers, "connection", 0), do: [], else: "connection: close\r\n"),
-      "\r\n"
+      "\r\n",
+      body
     ]
 
     try do
