@@ -85,18 +85,21 @@ defmodule CodexPooler.Gateway.Runtime.NativeResponseSteeringTest do
 
   defp assert_steering_idle_timeout!(row_locked?) do
     if row_locked?, do: BackendCodexWebsocketOwnerForwardingSupport.enter_peer_owner_topology!()
-    DownstreamKeepaliveScenario.put_settings!([websocket_idle_timeout_ms: 1_000], false)
-    fixture = start_fixture!(:off, :separate)
-    if row_locked?, do: register_unboxed_pool_cleanup!(fixture.setup)
+    DownstreamKeepaliveScenario.put_settings!([websocket_idle_timeout_ms: @detection_timeout_ms], false)
+    fixture = start_fixture!(:off, :separate, committed?: row_locked?)
     client = send_text!(fixture.client, steer(fixture.original_id))
     {client, _initial} = release_frames!(fixture, client, 0..2)
-    state = await_socket_connection_state!(client.socket, &is_map(Map.get(&1, :native_response_steering_active)))
+    state = await_socket_connection_state!(client.socket, &(is_map(Map.get(&1, :native_response_steering_active)) and MapSet.size(&1.tasks) == 0))
     identity = state.native_response_steering_active.identity
+    lane = :sys.get_state(fixture.lane)
+    assert {:ok, _result} = lane.original_result
+    assert lane.active.reserved.request.id == identity.request_id
     # The provider holds the successor terminal while the real client keeps answering pings.
     assert_receive {:fake_upstream_frame_barrier, 3, _handler, _hold}, @detection_timeout_ms
     lane_monitor = Process.monitor(fixture.lane)
     lock = if row_locked?, do: DownstreamKeepaliveScenario.hold_session_row!(state.codex_session.id)
     on_exit(fn -> if lock, do: send(lock.pid, :release) end)
+    arm_steering_idle_timeout!(client.socket)
     turn = DownstreamKeepaliveScenario.read_turn!(Map.put(client, :sent_at, System.monotonic_time(:millisecond)), answer_pings?: true)
     assert turn.end in [{:close, 1002}, :socket_closed]
 
@@ -119,6 +122,21 @@ defmodule CodexPooler.Gateway.Runtime.NativeResponseSteeringTest do
     refute RequestOutcome.client_cancelled?(successor)
     assert Repo.get!(Attempt, identity.attempt_id).response_metadata["downstream_interruption"] == successor.request_metadata["downstream_interruption"]
     Enum.each(settled, &assert_complete_ledger!/1)
+  end
+
+  defp arm_steering_idle_timeout!(socket_pid) do
+    # Fixture readiness has its own read budget and keepalive cadence. This
+    # scenario measures idle attribution, not ping frequency; restore the
+    # logged setting and arm the real 1 s timer only after successor readiness.
+    DownstreamKeepaliveScenario.put_settings!([websocket_idle_timeout_ms: 1_000], false)
+
+    {%ThousandIsland.Socket{read_timeout: 1_000}, _handler_state} =
+      :sys.replace_state(socket_pid, fn {socket, handler_state} ->
+        assert self() == socket_pid
+        {:noreply, {socket, handler_state}} = ThousandIsland.Handler.handle_continuation({:continue, handler_state, {:persistent, 1_000}}, socket)
+        assert is_integer(Process.read_timer(socket.read_timer))
+        {socket, handler_state}
+      end)
   end
 
   test "a queued independent prepare does not replace the producing request before grouped provider successor frames" do
@@ -480,7 +498,7 @@ defmodule CodexPooler.Gateway.Runtime.NativeResponseSteeringTest do
     expectations = [expected_request(response)]
     expectations = if Keyword.get(opts, :independent?, false), do: expectations ++ [expected_request(FakeUpstream.websocket_text_frames([created(independent_id), completed(independent_id, @independent_usage)]))], else: expectations
     upstream = start_upstream(FakeUpstream.strict_sequence(expectations))
-    setup = gateway_setup(upstream)
+    setup = steering_gateway_setup!(upstream, Keyword.get(opts, :committed?, false))
     set_model_serving_mode!(model_serving_scope(), setup, Keyword.get(opts, :mode, "full"))
     seed_unselected_catalog!(setup, Keyword.get(opts, :catalog_size, 0))
     {_server, port} = start_public_endpoint_with_server!()
@@ -528,6 +546,21 @@ defmodule CodexPooler.Gateway.Runtime.NativeResponseSteeringTest do
 
     %{setup: setup, upstream: upstream, hold: hold, handler: handler, client: client, thread: thread, lane: state.native_response_steering, upstream_session: upstream_session, before_create: before_create, original_id: original_id, successor_id: successor_id, independent_id: independent_id, successor_frames: successor_frames, steering_frames: steering_frames}
   end
+
+  defp steering_gateway_setup!(upstream, true) do
+    # Register cleanup before commit so a later socket/readiness failure cannot
+    # leak this graph from the row-lock scenario's auto-sandbox topology.
+    {:ok, setup} =
+      Repo.transaction(fn ->
+        setup = gateway_setup(upstream)
+        register_unboxed_pool_cleanup!(setup)
+        setup
+      end)
+
+    setup
+  end
+
+  defp steering_gateway_setup!(upstream, false), do: gateway_setup(upstream)
 
   defp seed_unselected_catalog!(_setup, 0), do: :ok
 
