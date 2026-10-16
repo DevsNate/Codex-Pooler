@@ -933,7 +933,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
     {remaining_tasks, state} =
       remaining_response_tasks_after_cleanup(state, reason, remaining_tasks)
 
-    cancel_response_tasks(remaining_tasks, :websocket_terminated)
+    {remaining_tasks, state} = finish_settling_response_tasks(state, reason, remaining_tasks)
 
     {remaining_tasks, state} =
       await_response_tasks(state, reason, remaining_tasks, response_task_drain_ms(state))
@@ -1092,6 +1092,23 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
     else
       await_response_tasks(state, reason, remaining_tasks, response_task_drain_ms(state))
     end
+  end
+
+  defp finish_settling_response_tasks(state, reason, tasks) do
+    registry = response_task_activity_registry(state)
+
+    deadline =
+      Enum.reduce(tasks, System.monotonic_time(:millisecond), fn pid, deadline ->
+        case ActivityRegistry.cancel_unless_settling(pid, :websocket_terminated, name: registry) do
+          {:settling, settlement_deadline} -> max(deadline, settlement_deadline)
+          :cancelled -> deadline
+        end
+      end)
+
+    # Keep this socket's real write evidence until the task hands its result
+    # back. The existing drain acknowledges and persists the receipt; dropping
+    # the task here would retain accounting but lose resend authority.
+    await_response_tasks(state, reason, tasks, max(deadline - System.monotonic_time(:millisecond), 0))
   end
 
   # Both post-cleanup drain budgets default to the module constants and can be

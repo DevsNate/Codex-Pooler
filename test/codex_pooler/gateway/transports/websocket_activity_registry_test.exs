@@ -9,6 +9,55 @@ defmodule CodexPooler.Gateway.Transports.Websocket.ActivityRegistryTest do
     {:ok, registry: name}
   end
 
+  test "terminal settlement protection is owned, finite and does not override rollout cancellation", %{registry: registry} do
+    parent = self()
+
+    {task, monitor} =
+      spawn_monitor(fn ->
+        {:ok, token} = ActivityRegistry.register(:proxy, self(), name: registry)
+        :ok = ActivityRegistry.admit(token, name: registry)
+        :ok = ActivityRegistry.protect_response_settlement(token, 5_000, name: registry)
+        {:settling, deadline} = ActivityRegistry.cancel_unless_settling(self(), :websocket_terminated, name: registry)
+        :ok = ActivityRegistry.protect_response_settlement(token, 50_000, name: registry)
+        send(parent, {:protected, token, deadline})
+
+        receive do
+          {:websocket_activity_cancel, ^token, :owner_drained} -> :ok
+        end
+      end)
+
+    on_exit(fn -> Process.exit(task, :kill) end)
+    assert_receive {:protected, token, deadline}
+    assert {:settling, ^deadline} = ActivityRegistry.cancel_unless_settling(task, :websocket_terminated, name: registry)
+    assert Process.alive?(task)
+    assert :ok = ActivityRegistry.cancel(token, :owner_drained, name: registry, force: true)
+    assert_receive {:DOWN, ^monitor, :process, ^task, :normal}
+  end
+
+  for protection <- [:foreign, :expired] do
+    test "#{protection} settlement protection does not prevent socket cancellation", %{registry: registry} do
+      parent = self()
+
+      {task, monitor} =
+        spawn_monitor(fn ->
+          {:ok, token} = ActivityRegistry.register(:proxy, self(), name: registry)
+          :ok = ActivityRegistry.admit(token, name: registry)
+          if unquote(protection) == :expired, do: ActivityRegistry.protect_response_settlement(token, 0, name: registry)
+          send(parent, {:ready, token})
+
+          receive do
+            :never -> :ok
+          end
+        end)
+
+      on_exit(fn -> Process.exit(task, :kill) end)
+      assert_receive {:ready, token}
+      if unquote(protection) == :foreign, do: ActivityRegistry.protect_response_settlement(token, 5_000, name: registry)
+      assert :cancelled = ActivityRegistry.cancel_unless_settling(task, :websocket_terminated, name: registry)
+      assert_receive {:DOWN, ^monitor, :process, ^task, {:shutdown, :websocket_terminated}}
+    end
+  end
+
   test "register-before-gate activity is included when cutoff wins the admission race", %{
     registry: registry
   } do

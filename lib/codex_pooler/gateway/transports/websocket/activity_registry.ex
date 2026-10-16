@@ -103,6 +103,14 @@ defmodule CodexPooler.Gateway.Transports.Websocket.ActivityRegistry do
   @spec delivery_settling?(pid(), keyword()) :: boolean()
   def delivery_settling?(pid, opts \\ []), do: GenServer.call(server(opts), {:delivery_settling, pid})
 
+  @spec protect_response_settlement(token(), non_neg_integer(), keyword()) :: :ok
+  def protect_response_settlement(token, budget_ms, opts \\ []),
+    do: GenServer.call(server(opts), {:protect_response_settlement, token, budget_ms})
+
+  @spec cancel_unless_settling(pid(), atom(), keyword()) :: :cancelled | {:settling, integer()}
+  def cancel_unless_settling(task, reason, opts \\ []),
+    do: GenServer.call(server(opts), {:cancel_unless_settling, task, reason})
+
   @spec acknowledge_retired_delivery(pid(), token(), keyword()) :: :ok | {:error, atom()}
   def acknowledge_retired_delivery(task, activity, opts \\ []), do: GenServer.call(server(opts), {:acknowledge_retired_delivery, task, activity})
 
@@ -260,6 +268,35 @@ defmodule CodexPooler.Gateway.Transports.Websocket.ActivityRegistry do
     stopped? = match?({_token, %{direct_cleanup: %{upstream_stop?: true}}}, direct_entry(state, task))
     pending? = Enum.any?(state.delivery_receipts, fn {_token, entry} -> (entry.actor == task or (entry.task == task and stopped?)) and not is_nil(entry.envelope) and not entry.finished? end)
     {:reply, pending?, state}
+  end
+
+  # The executor claims protection before its first terminal transaction.
+  # Socket cancellation and this claim share the registry mailbox: a socket
+  # cannot observe "not settling" and then kill an executor that entered the
+  # phase between the observation and its exit signal. The deadline never
+  # renews, and rollout drain's separate absolute cutoff remains authoritative.
+  def handle_call({:protect_response_settlement, token, budget_ms}, {task, _}, state) do
+    case Map.get(state.activities, token) do
+      %{pid: ^task} = entry ->
+        entry = Map.put_new(entry, :settlement_deadline, System.monotonic_time(:millisecond) + budget_ms)
+        {:reply, :ok, %{state | activities: Map.put(state.activities, token, entry)}}
+
+      _unknown ->
+        {:reply, :ok, state}
+    end
+  end
+
+  def handle_call({:cancel_unless_settling, task, reason}, _from, state) do
+    now = System.monotonic_time(:millisecond)
+
+    case direct_entry(state, task) do
+      {_token, %{settlement_deadline: deadline}} when deadline > now ->
+        {:reply, {:settling, deadline}, state}
+
+      _other ->
+        Process.exit(task, {:shutdown, reason})
+        {:reply, :cancelled, state}
+    end
   end
 
   def handle_call({:acknowledge_retired_delivery, task, activity}, {socket, _}, state) do

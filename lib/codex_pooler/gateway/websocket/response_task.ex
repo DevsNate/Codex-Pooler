@@ -12,6 +12,15 @@ defmodule CodexPooler.Gateway.Websocket.ResponseTask do
   @type cancel_callback :: (pid(), :owner_drained -> term())
   @type activity_token :: reference()
 
+  @doc false
+  @spec protect_settlement(non_neg_integer()) :: :ok
+  def protect_settlement(budget_ms) do
+    case Process.get({__MODULE__, :activity}) do
+      {registry, token} -> ActivityRegistry.protect_response_settlement(token, budget_ms, name: registry)
+      nil -> :ok
+    end
+  end
+
   @spec start(pid(), activity_kind(), run_callback(), cancel_callback(), keyword()) ::
           {:ok, pid()}
   def start(parent, kind, run_callback, cancel_callback, opts \\ [])
@@ -71,6 +80,8 @@ defmodule CodexPooler.Gateway.Websocket.ResponseTask do
         direct_cleanup_parent: parent
       )
 
+    Process.put({__MODULE__, :activity}, {registry, token})
+
     if ref = Keyword.get(opts, :direct_cleanup_ref),
       do:
         send(
@@ -115,6 +126,8 @@ defmodule CodexPooler.Gateway.Websocket.ResponseTask do
     ]
 
     with {:ok, token} <- ActivityRegistry.register(kind, self(), registration) do
+      Process.put({__MODULE__, :activity}, {registry, token})
+
       if kind == :direct and is_reference(Keyword.get(opts, :direct_cleanup_ref)),
         do:
           send(

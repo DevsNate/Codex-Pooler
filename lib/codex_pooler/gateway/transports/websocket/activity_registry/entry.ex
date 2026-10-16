@@ -18,6 +18,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.ActivityRegistry.Entry do
           optional(:direct_parent) => pid(),
           optional(:direct_cancelled?) => boolean(),
           optional(:terminal_delivered?) => boolean(),
+          optional(:settlement_deadline) => integer(),
           optional(:direct_cleanup) => %{
             required(:context) => CodexPooler.Gateway.Websocket.DirectCleanup.t(),
             required(:pending?) => boolean(),

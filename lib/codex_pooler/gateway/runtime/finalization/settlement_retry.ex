@@ -39,6 +39,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.SettlementRetry do
 
   require Logger
 
+  alias CodexPooler.Gateway.Websocket.ResponseTask
   alias CodexPooler.Platform.TransientDatabaseError
   alias CodexPooler.Repo
 
@@ -74,6 +75,8 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.SettlementRetry do
     if Repo.in_transaction?() do
       settle.()
     else
+      protect_websocket_settlement(stage)
+
       settle(%{
         stage: stage,
         request: request,
@@ -90,6 +93,22 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.SettlementRetry do
       })
     end
   end
+
+  # Only terminal accounting owns the remainder of this executor's lifetime.
+  # A visible-output mark or retryable attempt can still dispatch upstream
+  # work and must retain ordinary disconnect cancellation. Include the first
+  # transaction and the last retry's query timeout around the retry window.
+  defp protect_websocket_settlement(stage) when stage in [:finalize_success, :finalize_failure, :finalize_partial_stream_failure, :finalize_reservation_failure, :reconcile_retained_usage] do
+    query_timeout =
+      case Keyword.get(Repo.config(), :timeout) do
+        timeout when is_integer(timeout) and timeout > 0 -> timeout
+        _unbounded_or_absent -> 15_000
+      end
+
+    ResponseTask.protect_settlement(config().window_ms + 2 * query_timeout)
+  end
+
+  defp protect_websocket_settlement(_stage), do: :ok
 
   defp settle(%{settle: settle} = run) do
     result = settle.()
