@@ -51,6 +51,60 @@ defmodule CodexPoolerWeb.V1.ImagesNativeDispatchTest do
     assert SettlementPresentation.cost(settlement).usd == nil
   end
 
+  for operation <- ["generations", "edits"], shape <- [:url_only, :mixed_url] do
+    @operation operation
+    @shape shape
+    test "native #{@operation} rejects #{@shape} results without downloading and settles known usage once", %{conn: conn} do
+      download = start_upstream({:json, 200, %{"unexpected" => true}})
+      url = FakeUpstream.url(download) <> "/private-image.png?signature=synthetic-private"
+      valid = %{"b64_json" => Base.encode64(png())}
+      data = if @shape == :url_only, do: [%{"url" => url}], else: [valid, %{"url" => url}]
+      usage = %{"input_tokens" => 7, "output_tokens" => 13, "total_tokens" => 20}
+      upstream = start_upstream({:json, 200, %{"created" => 1, "data" => data, "usage" => usage}})
+      setup = gateway_setup(upstream)
+      payload = %{"model" => "gpt-image-2", "prompt" => "synthetic image"}
+
+      payload =
+        if @operation == "edits" do
+          file = Path.join(System.tmp_dir!(), "native-invalid-image-#{System.unique_integer([:positive])}.png")
+          on_exit(fn -> File.rm(file) end)
+          File.write!(file, png())
+          Map.put(payload, "image", %Plug.Upload{path: file, filename: "source.png", content_type: "image/png"})
+        else
+          payload
+        end
+
+      response = conn |> auth(setup) |> post("/v1/images/#{@operation}", payload)
+
+      assert json_response(response, 502) == %{
+               "error" => %{
+                 "code" => "image_generation_failed",
+                 "message" => "upstream request failed",
+                 "type" => "server_error"
+               }
+             }
+
+      assert FakeUpstream.count(download) == 0
+      assert [captured] = FakeUpstream.requests(upstream)
+      assert captured.path == "/backend-api/codex/images/#{@operation}"
+      assert [request] = Repo.all(Request)
+      assert request.status == "failed"
+      assert request.usage_status == "usage_known"
+      assert request.response_status_code == 502
+      assert [attempt] = Repo.all(Attempt)
+      assert attempt.status == "failed"
+      assert attempt.usage_status == "usage_known"
+      assert attempt.upstream_status_code == 200
+      assert [settlement] = Repo.all(from(e in LedgerEntry, where: e.request_id == ^request.id and e.entry_kind == "settlement"))
+      assert {settlement.input_tokens, settlement.output_tokens, settlement.total_tokens} == {7, 13, 20}
+
+      for metadata <- [request.request_metadata, attempt.response_metadata] do
+        refute inspect(metadata) =~ url
+        refute inspect(metadata) =~ valid["b64_json"]
+      end
+    end
+  end
+
   for mode <- ["full", "lite"], operation <- ["generations", "edits"] do
     @usage_mode mode
     @usage_operation operation

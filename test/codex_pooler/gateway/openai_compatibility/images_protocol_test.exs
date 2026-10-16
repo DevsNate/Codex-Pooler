@@ -94,7 +94,7 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.ImagesProtocolTest do
       item = %{
         "type" => "image_generation_call",
         "status" => "completed",
-        "result" => "SYNTHETIC"
+        "result" => encoded_image()
       }
 
       item = if id, do: Map.put(item, "id", id), else: item
@@ -134,6 +134,35 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.ImagesProtocolTest do
               message: "upstream image generation failed",
               param: nil
             }} = Images.image_response_from_sse(body)
+  end
+
+  test "malformed image results fail the whole response instead of being relabeled or dropped" do
+    valid = image_item(encoded_image())
+
+    for result <- [nil, "", 42, %{"url" => "https://example.com/image.png"}, "https://example.com/image.png", "%%%", Base.encode64("not an image")],
+        invalid <- [image_item(result), Map.delete(image_item(result), "result")],
+        items <- [[invalid], [valid, invalid], [invalid, valid]] do
+      assert {:error, %{status: 502, code: "image_generation_failed"}} =
+               Images.image_response_from_sse(stream([%{"type" => "response.completed", "response" => %{"output" => items}}]))
+    end
+  end
+
+  test "valid image results retain order and terminal replacements are authoritative" do
+    first = encoded_image(0)
+    second = encoded_image(255)
+    one = Map.put(image_item(first), "id", "ig_one")
+    two = Map.put(image_item(second), "id", "ig_two")
+
+    assert {:ok, %{"data" => [%{"b64_json" => ^first}, %{"b64_json" => ^second}]}} =
+             Images.image_response_from_sse(stream([%{"type" => "response.completed", "response" => %{"output" => [one, two]}}]))
+
+    invalid = Map.put(one, "result", "https://example.com/image.png")
+
+    assert {:ok, %{"data" => [%{"b64_json" => ^first}]}} =
+             Images.image_response_from_sse(stream([%{"type" => "response.output_item.done", "item" => invalid}, %{"type" => "response.completed", "response" => %{"output" => [one]}}]))
+
+    assert {:error, %{code: "image_generation_failed"}} =
+             Images.image_response_from_sse(stream([%{"type" => "response.output_item.done", "item" => one}, %{"type" => "response.completed", "response" => %{"output" => [invalid]}}]))
   end
 
   test "edit mask is carried by the image tool without modifying prompt" do
@@ -188,7 +217,8 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.ImagesProtocolTest do
 
   test "terminal output supersedes earlier same-id items and ignores created snapshots" do
     item = %{"id" => "ig_fixture", "type" => "image_generation_call", "status" => "in_progress"}
-    final = Map.merge(item, %{"status" => "completed", "result" => "FINAL"})
+    encoded = encoded_image()
+    final = Map.merge(item, %{"status" => "completed", "result" => encoded})
 
     body =
       stream([
@@ -197,7 +227,7 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.ImagesProtocolTest do
         %{"type" => "response.completed", "response" => %{"output" => [final]}}
       ])
 
-    assert {:ok, %{"data" => [%{"b64_json" => "FINAL"}]}} = Images.image_response_from_sse(body)
+    assert {:ok, %{"data" => [%{"b64_json" => ^encoded}]}} = Images.image_response_from_sse(body)
   end
 
   test "null item ids do not collapse distinct results and failed final items remain errors" do
@@ -205,10 +235,10 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.ImagesProtocolTest do
       "id" => nil,
       "type" => "image_generation_call",
       "status" => "completed",
-      "result" => "ONE"
+      "result" => encoded_image(0)
     }
 
-    two = Map.put(one, "result", "TWO")
+    two = Map.put(one, "result", encoded_image(255))
 
     assert {:ok, %{"data" => [_, _]}} =
              Images.image_response_from_sse(
@@ -255,7 +285,7 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.ImagesProtocolTest do
   end
 
   test "failed terminal cannot expose an earlier successful image" do
-    item = %{"type" => "image_generation_call", "status" => "completed", "result" => "SYNTHETIC"}
+    item = %{"type" => "image_generation_call", "status" => "completed", "result" => encoded_image()}
 
     for type <- ["response.failed", "response.incomplete", "error"] do
       assert {:error, %{code: "image_generation_failed"}} =
@@ -292,6 +322,16 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.ImagesProtocolTest do
   end
 
   defp payload, do: %{"model" => "gpt-image-1", "prompt" => "synthetic"}
+
+  defp image_item(result), do: %{"type" => "image_generation_call", "status" => "completed", "result" => result}
+
+  defp encoded_image(color \\ 0) do
+    header = <<1::32, 1::32, 8, 2, 0, 0, 0>>
+    pixels = :zlib.compress(<<0, color, color, color>>)
+    Base.encode64(<<137, 80, 78, 71, 13, 10, 26, 10>> <> png_chunk("IHDR", header) <> png_chunk("IDAT", pixels) <> png_chunk("IEND", ""))
+  end
+
+  defp png_chunk(type, data), do: <<byte_size(data)::32, type::binary, data::binary, :erlang.crc32(type <> data)::32>>
 
   defp stream(events),
     do: Enum.map_join(events, "", &("data: " <> CodexPooler.JSON.encode!(&1) <> "\n\n"))

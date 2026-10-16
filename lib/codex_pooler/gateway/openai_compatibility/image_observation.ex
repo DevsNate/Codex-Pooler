@@ -1,6 +1,8 @@
 defmodule CodexPooler.Gateway.OpenAICompatibility.ImageObservation do
   @moduledoc false
 
+  alias CodexPooler.Gateway.OpenAICompatibility.ImageResult
+
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
   alias CodexPooler.Gateway.Transports.Websocket.DiagnosticTaxonomy
 
@@ -71,7 +73,7 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.ImageObservation do
 
     selected =
       Enum.find(
-        ~w(failed_image_item usable_image_result empty_image_result nonstring_image_result),
+        ~w(failed_image_item invalid_image_result empty_image_result nonstring_image_result usable_image_result),
         &(&1 in [prior, outcome])
       )
 
@@ -99,7 +101,10 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.ImageObservation do
 
   defp image_outcome(%{"status" => "failed"}), do: "failed_image_item"
   defp image_outcome(%{"result" => ""}), do: "empty_image_result"
-  defp image_outcome(%{"result" => result}) when is_binary(result), do: "usable_image_result"
+
+  defp image_outcome(%{"result" => result}) when is_binary(result),
+    do: if(ImageResult.encoded_image?(result), do: "usable_image_result", else: "invalid_image_result")
+
   defp image_outcome(_item), do: "nonstring_image_result"
 
   defp error_code(%{"error" => %{"code" => code}}) when is_binary(code),

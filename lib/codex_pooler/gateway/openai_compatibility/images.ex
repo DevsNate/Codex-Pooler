@@ -1,7 +1,7 @@
 defmodule CodexPooler.Gateway.OpenAICompatibility.Images do
   @moduledoc false
 
-  alias CodexPooler.Gateway.OpenAICompatibility.{Error, Responses, Validation}
+  alias CodexPooler.Gateway.OpenAICompatibility.{Error, ImageResult, Responses, Validation}
   alias CodexPooler.Gateway.Payloads.RequestOptions
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
 
@@ -115,7 +115,7 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Images do
          {:ok, items} <- image_items(events),
          :ok <- reject_failed_items(items),
          :ok <- require_completed_event(events),
-         data when data != [] <- image_data(items) do
+         {:ok, data} <- image_data(items) do
       {:ok,
        %{
          "created" => DateTime.utc_now() |> DateTime.to_unix(),
@@ -123,14 +123,6 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Images do
        }
        |> maybe_put_usage(events)}
     else
-      [] ->
-        {:error,
-         Error.reason(
-           502,
-           "image_generation_failed",
-           "upstream image response contained no image data"
-         )}
-
       {:error, reason} ->
         {:error, reason}
     end
@@ -465,16 +457,17 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Images do
   end
 
   defp image_data(items) do
-    items
-    |> Enum.reverse()
-    |> Enum.uniq_by(&(Map.get(&1, "id") || &1))
-    |> Enum.reverse()
-    |> Enum.flat_map(fn item ->
-      case Map.get(item, "result") do
-        result when is_binary(result) and result != "" -> [image_data_item(result, item)]
-        _result -> []
-      end
-    end)
+    items =
+      items
+      |> Enum.reverse()
+      |> Enum.uniq_by(&(Map.get(&1, "id") || &1))
+      |> Enum.reverse()
+
+    if Enum.all?(items, &ImageResult.encoded_image?(Map.get(&1, "result"))) do
+      {:ok, Enum.map(items, &image_data_item(&1["result"], &1))}
+    else
+      {:error, Error.reason(502, "image_generation_failed", "upstream image response contained invalid image data")}
+    end
   end
 
   defp image_data_item(result, item) do

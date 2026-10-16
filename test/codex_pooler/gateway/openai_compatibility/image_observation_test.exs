@@ -54,7 +54,10 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.ImageObservationTest do
           {[%{"type" => "image_generation_call", "status" => "failed"}], "failed_image_item"},
           {[%{"type" => "image_generation_call", "result" => ""}], "empty_image_result"},
           {[%{"type" => "image_generation_call", "result" => 42}], "nonstring_image_result"},
-          {[%{"type" => "image_generation_call", "result" => "private-content"}], "usable_image_result"}
+          {[%{"type" => "image_generation_call", "result" => "private-content"}], "invalid_image_result"},
+          {[%{"type" => "image_generation_call", "result" => "https://example.com/image.png"}], "invalid_image_result"},
+          {[%{"type" => "image_generation_call", "result" => encoded_image()}], "usable_image_result"},
+          {[%{"type" => "image_generation_call", "result" => encoded_image()}, %{"type" => "image_generation_call", "result" => "private-content"}], "invalid_image_result"}
         ] do
       body =
         "data: " <>
@@ -117,4 +120,6 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.ImageObservationTest do
     assert observation.terminal == "absent"
     refute inspect(observation) =~ "private-refusal"
   end
+
+  defp encoded_image, do: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgYGAAAAAEAAH2FzhVAAAAAElFTkSuQmCC"
 end

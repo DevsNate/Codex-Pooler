@@ -63,7 +63,7 @@ defmodule CodexPoolerWeb.V1.ImagesControllerTest do
   test "POST /v1/images/generations returns OpenAI image response from Responses stream", %{
     conn: conn
   } do
-    upstream = start_upstream(image_success_stream("B64_GENERATED", "refined prompt"))
+    upstream = start_upstream(image_success_stream(encoded_image(), "refined prompt"))
     setup = upstream |> gateway_setup() |> use_image_model!("gpt-image-1")
 
     conn =
@@ -79,10 +79,11 @@ defmodule CodexPoolerWeb.V1.ImagesControllerTest do
 
     assert %{
              "created" => created,
-             "data" => [%{"b64_json" => "B64_GENERATED", "revised_prompt" => "refined prompt"}],
+             "data" => [%{"b64_json" => encoded, "revised_prompt" => "refined prompt"}],
              "usage" => %{"input_tokens" => 7, "output_tokens" => 13, "total_tokens" => 20}
            } = json_response(conn, 200)
 
+    assert encoded == encoded_image()
     assert is_integer(created)
 
     assert [captured] = FakeUpstream.requests(upstream)
@@ -104,13 +105,13 @@ defmodule CodexPoolerWeb.V1.ImagesControllerTest do
              "/backend-api/codex/responses"
 
     refute inspect(request.request_metadata) =~ "synthetic image request"
-    refute inspect(request.request_metadata) =~ "B64_GENERATED"
+    refute inspect(request.request_metadata) =~ encoded_image()
   end
 
   test "POST /v1/images/generations accepts idless image generation output items", %{
     conn: conn
   } do
-    upstream = start_upstream(image_success_stream("B64_IDLESS", nil, id: false))
+    upstream = start_upstream(image_success_stream(encoded_image(), nil, id: false))
     setup = upstream |> gateway_setup() |> use_image_model!("gpt-image-1")
 
     conn =
@@ -124,17 +125,18 @@ defmodule CodexPoolerWeb.V1.ImagesControllerTest do
         "n" => 1
       })
 
-    assert %{"data" => [%{"b64_json" => "B64_IDLESS"}]} = json_response(conn, 200)
+    assert %{"data" => [%{"b64_json" => encoded}]} = json_response(conn, 200)
+    assert encoded == encoded_image()
 
     assert [request] = Repo.all(from(r in Request, where: r.pool_id == ^setup.pool.id))
     assert request.status == "succeeded"
     refute inspect(request.request_metadata) =~ "synthetic idless image request"
-    refute inspect(request.request_metadata) =~ "B64_IDLESS"
+    refute inspect(request.request_metadata) =~ encoded_image()
   end
 
   test "POST /v1/images/generations routes through a visible host model when image model is not listed",
        %{conn: conn} do
-    upstream = start_upstream(image_success_stream("B64_HIDDEN", "hidden prompt"))
+    upstream = start_upstream(image_success_stream(encoded_image(), "hidden prompt"))
 
     setup =
       upstream
@@ -152,8 +154,10 @@ defmodule CodexPoolerWeb.V1.ImagesControllerTest do
         "n" => 1
       })
 
-    assert %{"data" => [%{"b64_json" => "B64_HIDDEN", "revised_prompt" => "hidden prompt"}]} =
+    assert %{"data" => [%{"b64_json" => encoded, "revised_prompt" => "hidden prompt"}]} =
              json_response(conn, 200)
+
+    assert encoded == encoded_image()
 
     assert [captured] = FakeUpstream.requests(upstream)
     assert captured.path == "/backend-api/codex/responses"
@@ -180,11 +184,11 @@ defmodule CodexPoolerWeb.V1.ImagesControllerTest do
              expected_mode_metadata
 
     refute inspect(request.request_metadata) =~ "synthetic hidden image request"
-    refute inspect(request.request_metadata) =~ "B64_HIDDEN"
+    refute inspect(request.request_metadata) =~ encoded_image()
   end
 
   test "POST /v1/images/edits sends uploaded image as transient input_image", %{conn: conn} do
-    upstream = start_upstream(image_success_stream("B64_EDITED", "edited prompt"))
+    upstream = start_upstream(image_success_stream(encoded_image(), "edited prompt"))
     setup = upstream |> gateway_setup() |> use_image_model!("gpt-image-1")
     image_bytes = <<137, 80, 78, 71, 13, 10, 26, 10, 0, 1, 2, 3>>
 
@@ -199,8 +203,10 @@ defmodule CodexPoolerWeb.V1.ImagesControllerTest do
         "image" => upload_fixture("source-private.png", "image/png", image_bytes)
       })
 
-    assert %{"data" => [%{"b64_json" => "B64_EDITED", "revised_prompt" => "edited prompt"}]} =
+    assert %{"data" => [%{"b64_json" => encoded, "revised_prompt" => "edited prompt"}]} =
              json_response(conn, 200)
+
+    assert encoded == encoded_image()
 
     assert [captured] = FakeUpstream.requests(upstream)
     assert [%{"content" => content}] = captured.json["input"]
@@ -283,7 +289,7 @@ defmodule CodexPoolerWeb.V1.ImagesControllerTest do
 
   @tag :image_truncated_eof
   test "image output followed by clean EOF without completion is rejected", %{conn: conn} do
-    item = %{"type" => "image_generation_call", "status" => "completed", "result" => "SYNTHETIC"}
+    item = %{"type" => "image_generation_call", "status" => "completed", "result" => encoded_image()}
 
     upstream =
       start_upstream(
@@ -315,6 +321,23 @@ defmodule CodexPoolerWeb.V1.ImagesControllerTest do
     assert %{"error" => %{"code" => "unsupported_endpoint"}} = json_response(conn, 404)
     assert FakeUpstream.requests(upstream) == []
     assert Repo.aggregate(Request, :count) == 0
+  end
+
+  defp encoded_image do
+    chunks = [
+      {"IHDR", <<1::32, 1::32, 8, 2, 0, 0, 0>>},
+      {"IDAT", :zlib.compress(<<0, 0, 0, 255>>)},
+      {"IEND", ""}
+    ]
+
+    [
+      <<137, 80, 78, 71, 13, 10, 26, 10>>
+      | Enum.map(chunks, fn {type, data} ->
+          <<byte_size(data)::32, type::binary, data::binary, :erlang.crc32(type <> data)::32>>
+        end)
+    ]
+    |> IO.iodata_to_binary()
+    |> Base.encode64()
   end
 
   defp use_image_model!(setup, model_id) do

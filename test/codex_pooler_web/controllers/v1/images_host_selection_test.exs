@@ -294,7 +294,8 @@ defmodule CodexPoolerWeb.V1.ImagesHostSelectionTest do
         "prompt" => "synthetic image"
       })
 
-    assert %{"data" => [%{"b64_json" => "c3ludGhldGlj"}]} = json_response(result, 200)
+    assert %{"data" => [%{"b64_json" => encoded}]} = json_response(result, 200)
+    assert encoded == encoded_image()
     assert [captured] = FakeUpstream.requests(upstream)
     assert captured.json["model"] == expected.upstream_model_id
     assert [%{"model" => "gpt-image-1", "type" => "image_generation"}] = captured.json["tools"]
@@ -305,12 +306,29 @@ defmodule CodexPoolerWeb.V1.ImagesHostSelectionTest do
     assert attempt.upstream_model_id == expected.upstream_model_id
   end
 
+  defp encoded_image do
+    chunks = [
+      {"IHDR", <<1::32, 1::32, 8, 2, 0, 0, 0>>},
+      {"IDAT", :zlib.compress(<<0, 0, 0, 255>>)},
+      {"IEND", ""}
+    ]
+
+    [
+      <<137, 80, 78, 71, 13, 10, 26, 10>>
+      | Enum.map(chunks, fn {type, data} ->
+          <<byte_size(data)::32, type::binary, data::binary, :erlang.crc32(type <> data)::32>>
+        end)
+    ]
+    |> IO.iodata_to_binary()
+    |> Base.encode64()
+  end
+
   defp image_stream do
     payload = %{
       "type" => "response.completed",
       "response" => %{
         "status" => "completed",
-        "output" => [%{"type" => "image_generation_call", "result" => "c3ludGhldGlj"}],
+        "output" => [%{"type" => "image_generation_call", "result" => encoded_image()}],
         "usage" => %{"input_tokens" => 1, "output_tokens" => 1, "total_tokens" => 2}
       }
     }

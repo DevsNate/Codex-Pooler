@@ -578,6 +578,8 @@ The bundled pricing catalog includes standard and batch text/image token rates f
 
 Image responses contain base64 image data. `response_format` may be omitted or set to `b64_json`; `url` and other values are rejected. The optional `user` hint accepts a string or null and is discarded before dispatch; it does not establish ownership or routing identity. Unsupported options, including image streaming and output compression, are rejected rather than silently ignored.
 
+Both native Images responses and translated Responses tool results are checked for base64-encoded PNG, JPEG, or WebP structure before success is recorded. If any final image result is missing or malformed, the entire response fails with `502 image_generation_failed`; valid images are not returned as a partial success. Result URLs are not downloaded or relabeled as base64.
+
 ### Audio transcriptions
 
 The Pool's `Allow Audio Transcription` setting must be enabled (the default). Disabling it rejects transcription requests with `403 audio_transcription_disabled` before the upload is parsed or sent upstream.

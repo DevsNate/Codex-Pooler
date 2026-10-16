@@ -113,12 +113,65 @@ defmodule CodexPoolerWeb.V1.ImagesServingModeTest do
     end
   end
 
+  for mode <- ["full", "lite"],
+      operation <- ["generations", "edits"],
+      shape <- [:url_only, :mixed_url, :mixed_missing, :mixed_empty] do
+    @mode mode
+    @operation operation
+    @shape shape
+    test "#{@mode} #{@operation} rejects #{@shape} image output without fetching URLs", %{conn: conn} do
+      download = start_upstream({:json, 200, %{"unexpected" => true}})
+      url = FakeUpstream.url(download) <> "/private-image.png?signature=synthetic-private"
+      valid = %{"type" => "image_generation_call", "status" => "completed", "result" => Base.encode64(png(0, 0, 255))}
+      invalid = Map.put(valid, "result", url)
+
+      output =
+        case @shape do
+          :url_only -> [invalid]
+          :mixed_url -> [valid, invalid]
+          :mixed_missing -> [valid, Map.delete(invalid, "result")]
+          :mixed_empty -> [valid, Map.put(invalid, "result", "")]
+        end
+
+      upstream = start_upstream(image_output_stream(output))
+      setup = setup_host(upstream, @mode)
+      response = image_request(auth(conn, setup), @operation, png(255, 0, 0))
+
+      assert json_response(response, 502) == %{
+               "error" => %{
+                 "code" => "image_generation_failed",
+                 "message" => "upstream request failed",
+                 "type" => "server_error"
+               }
+             }
+
+      assert FakeUpstream.count(download) == 0
+      assert [captured] = FakeUpstream.requests(upstream)
+      assert captured.path == "/backend-api/codex/responses"
+      assert [request] = Repo.all(Request)
+      assert request.status == "failed"
+      assert request.response_status_code == 502
+      assert request.last_error_code == "image_generation_failed"
+      assert [attempt] = Repo.all(Attempt)
+      assert attempt.status == "failed"
+      assert attempt.upstream_status_code == 200
+      assert attempt.network_error_code == "image_generation_failed"
+      assert_usage_settled_once(request, attempt)
+
+      for metadata <- [request.request_metadata, attempt.response_metadata] do
+        refute inspect(metadata) =~ url
+        refute inspect(metadata) =~ valid["result"]
+      end
+    end
+  end
+
   for mode <- ["full", "lite"], chunk_size <- [257, 8191] do
     @mode mode
     @chunk_size chunk_size
     test "#{@mode} image output larger than retained diagnostics survives #{@chunk_size} byte chunks",
          %{conn: conn} do
-      encoded = Base.encode64(:binary.copy(<<0, 1, 2, 3>>, 30_000))
+      encoded = Base.encode64(large_png())
+      assert byte_size(encoded) > 1_000_000
       {:sse, chunks} = image_stream(encoded)
       stream = IO.iodata_to_binary(chunks)
       upstream = start_upstream({:sse, split_chunks(stream, @chunk_size)})
@@ -401,6 +454,10 @@ defmodule CodexPoolerWeb.V1.ImagesServingModeTest do
         do: [],
         else: [%{"type" => "image_generation_call", "status" => "completed", "result" => result}]
 
+    image_output_stream(output)
+  end
+
+  defp image_output_stream(output) do
     FakeUpstream.sse_stream([
       {"response.completed",
        %{
@@ -428,6 +485,18 @@ defmodule CodexPoolerWeb.V1.ImagesServingModeTest do
 
     assert {settlement.input_tokens, settlement.output_tokens, settlement.total_tokens} ==
              {7, 13, 20}
+  end
+
+  defp large_png do
+    pixels = for index <- 1..36_864, into: <<>>, do: :crypto.hash(:sha256, <<index::32>>)
+    scanlines = for <<row::binary-size(3072) <- pixels>>, into: <<>>, do: <<0, row::binary>>
+
+    IO.iodata_to_binary([
+      <<137, 80, 78, 71, 13, 10, 26, 10>>,
+      png_chunk("IHDR", <<1024::32, 384::32, 8, 2, 0, 0, 0>>),
+      png_chunk("IDAT", :zlib.compress(scanlines)),
+      png_chunk("IEND", <<>>)
+    ])
   end
 
   defp png(red, green, blue) do
