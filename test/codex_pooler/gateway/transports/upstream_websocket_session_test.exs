@@ -5992,13 +5992,11 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
 
   @tag :continuation_generation_boundary
   test "native fresh continuation acquires a replacement without sending and reuses it for explicit full retry" do
-    upstream =
-      start_upstream(
-        # provenance: synthetic_adversarial
-        FakeUpstream.strict_sequence([
-          strict_websocket_turn(websocket_success_without_id(), websocket_connection_ordinal: 1)
-        ])
-      )
+    init_ref = make_ref()
+
+    # provenance: synthetic_adversarial
+    mode = FakeUpstream.strict_sequence([strict_websocket_turn(websocket_success_without_id(), websocket_connection_ordinal: 1)])
+    upstream = start_upstream(FakeUpstream.websocket_init_barrier(mode, notify: self(), release_ref: init_ref))
 
     {:ok, session} = UpstreamWebsocketSession.start_link([])
     on_exit(fn -> UpstreamWebsocketSession.close(session) end)
@@ -6018,10 +6016,19 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
     terminal = native_retry_terminal()
     assert_receive {:native_guard_frame, ^terminal}, @message_detection_timeout_ms
     refute_received {:native_guard_frame, _extra_frame}
+    assert_receive {:fake_upstream_websocket_barrier, :before_init, websocket_pid, ^init_ref}, @message_detection_timeout_ms
+    on_exit(fn -> send(websocket_pid, {:fake_upstream_release_websocket, init_ref}) end)
+    # The client accepts the upgrade before the server's WebSock init records
+    # it. Keep that ordering deterministic and wait for the server's receipt.
     assert FakeUpstream.requests(upstream) == []
-    assert FakeUpstream.websocket_connection_count(upstream) == 1
+    assert FakeUpstream.websocket_connection_count(upstream) == 0
     assert {:ok, %{generation: generation}} = UpstreamWebsocketSession.live_connection(session)
     assert is_integer(generation)
+
+    FakeUpstream.set_mode(upstream, mode)
+    send(websocket_pid, {:fake_upstream_release_websocket, init_ref})
+    assert_receive {:fake_upstream_websocket_initialized, ^websocket_pid, ^init_ref}, @message_detection_timeout_ms
+    assert FakeUpstream.websocket_connection_count(upstream) == 1
 
     assert {:ok, result} = UpstreamWebsocketSession.request(session, request)
     assert result.upstream_websocket_connection.reused
