@@ -522,11 +522,18 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RetainedUs
 
   defp interrupt!(:drain, owner, _pending), do: assert(:ok = WebsocketOwnerSession.drain_owner(owner))
 
-  defp interrupt!(:retirement, _owner, pending) do
+  defp interrupt!(:retirement, owner, pending) do
+    owner_monitor = Process.monitor(owner)
+    :sys.get_state(owner, @timeout)
     upstream = pending.upstream_pid
     monitor = Process.monitor(upstream)
     Process.exit(upstream, :kill)
     assert_receive {:DOWN, ^monitor, :process, ^upstream, :killed}, @timeout
+    # Receipt settlement precedes owner termination and lease release. The
+    # successor must not attach to that still-registered retiring owner.
+    assert_receive {:DOWN, ^owner_monitor, :process, ^owner, :owner_crashed}, @timeout
+    assert {:error, :owner_unavailable} = :erpc.call(node(owner), WebsocketOwnerSession, :lookup, [pending.codex_session_id])
+    assert Repo.get_by!(BridgeOwnerLease, codex_session_id: pending.codex_session_id, lease_token: pending.owner_lease_token).status == "released"
   end
 
   defp await_pending!(owner, limit) do
