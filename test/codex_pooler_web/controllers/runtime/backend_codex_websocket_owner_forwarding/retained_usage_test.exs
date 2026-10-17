@@ -292,7 +292,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RetainedUs
     %{rows: [[backend]]} = Postgrex.query!(lock, "SELECT pg_backend_pid() FROM requests WHERE id=$1 FOR UPDATE", [Ecto.UUID.dump!(request_id)])
     drain = Task.async(fn -> RolloutDrain.start_drain([name: harness.name, timeout_ms: 5_000] ++ WebsocketRolloutDrainSupport.deadline_options(harness.deadline)) end)
     clock = harness.deadline
-    assert_receive {:rollout_drain_deadline_wait, ^clock, _}, @timeout
+    # Both pollers must register before advancing: a waiter registered after
+    # the advance would otherwise wait for a second advance that never comes.
+    await_owner_and_receipt_poll!(clock, deadline())
     assert %{pending_producers: 1, entries: []} = ActivityRegistry.receipt_cohort(name: harness.activity_registry)
     VirtualDeadline.advance(clock, :sys.get_state(harness.name).deadline_ms)
 
