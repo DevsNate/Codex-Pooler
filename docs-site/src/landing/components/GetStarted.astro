@@ -52,7 +52,8 @@ const copyText = (lines: Line[]) =>
 const steps = [
   {
     title: "Start Pooler",
-    text: "Docker Compose runs the app and its database on one machine. On Kubernetes, the Helm chart runs separate web, worker and scheduler roles. Both pin a stable release.",
+    text: "Use Docker Compose for one machine, Railway in your own account, or Helm for separate web, worker and scheduler roles. Pin a stable release.",
+    link: { href: docs("/deployment/railway/"), label: "Railway setup guide" },
   },
   {
     title: "Add your accounts",
@@ -73,7 +74,7 @@ const steps = [
       <header class="section-head" data-reveal>
         <p class="eyebrow">Get started</p>
         <h2 class="h2" id="start-title">Up and running <em>in minutes.</em></h2>
-        <p class="lede">A machine with Docker, or a Kubernetes cluster. No sign-up with us, and nothing is ever sent to us.</p>
+        <p class="lede">Docker, your Railway account, or Kubernetes. No sign-up with us, and nothing is ever sent to us.</p>
       </header>
 
       <ol class="steps">
@@ -128,6 +129,11 @@ const steps = [
           ))
         }
       </div>
+      <a class="btn btn-primary" href="https://railway.com/deploy/QsYrfa?referralCode=ftyt7p&utm_medium=integration&utm_source=template&utm_campaign=generic" rel="sponsored">
+        One-click deploy on Railway
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 10h11m-4.5-4.5L15 10l-4.5 4.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
+      </a>
+      <p><small>Railway hosting is billed separately.</small></p>
     </div>
   </div>
 </section>

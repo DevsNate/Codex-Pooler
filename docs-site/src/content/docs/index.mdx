@@ -8,7 +8,7 @@ head:
     attrs:
       type: application/ld+json
     content: |
-      {"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Is Codex Pooler a hosted service?","acceptedAnswer":{"@type":"Answer","text":"No. The public docs describe a self-hosted application that can run with Docker Compose or the published Helm chart. It is not documented as a hosted provider. Operators are responsible for their own deployment, credentials, infrastructure, and authorized use of upstream accounts."}},{"@type":"Question","name":"Does Codex Pooler provide full OpenAI API compatibility?","acceptedAnswer":{"@type":"Answer","text":"No. Codex Pooler provides narrow OpenAI-compatible /v1 support for selected SDK routes, then translates supported work into Codex-compatible requests. Unsupported /v1 routes may return deterministic OpenAI-shaped unsupported endpoint errors, and OpenAI Realtime SDK websocket or session routes are not supported."}},{"@type":"Question","name":"Which base URL should an AI coding client use?","acceptedAnswer":{"@type":"Answer","text":"Codex backend-compatible clients should use https://codex-pooler.example.com/backend-api/codex. Selected OpenAI SDK-compatible clients should use https://codex-pooler.example.com/v1. Operator metadata tools should use https://codex-pooler.example.com/mcp with an operator MCP token, not a Pool API key."}}]}
+      {"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Is Codex Pooler a hosted service?","acceptedAnswer":{"@type":"Answer","text":"No. Codex Pooler is self-hosted software. You can run it with Docker Compose, in your Railway account, or with the published Helm chart. Operators are responsible for their own deployment, credentials, infrastructure costs, and authorized use of upstream accounts."}},{"@type":"Question","name":"Does Codex Pooler provide full OpenAI API compatibility?","acceptedAnswer":{"@type":"Answer","text":"No. Codex Pooler provides narrow OpenAI-compatible /v1 support for selected SDK routes, then translates supported work into Codex-compatible requests. Unsupported /v1 routes may return deterministic OpenAI-shaped unsupported endpoint errors, and OpenAI Realtime SDK websocket or session routes are not supported."}},{"@type":"Question","name":"Which base URL should an AI coding client use?","acceptedAnswer":{"@type":"Answer","text":"Codex backend-compatible clients should use https://codex-pooler.example.com/backend-api/codex. Selected OpenAI SDK-compatible clients should use https://codex-pooler.example.com/v1. Operator metadata tools should use https://codex-pooler.example.com/mcp with an operator MCP token, not a Pool API key."}}]}
 ---
 
 ## What Is Codex Pooler?
@@ -26,7 +26,7 @@ Codex Pooler is built for operators who need shared Codex capacity without losin
 - **Keep clients stable while capacity changes.** Rotate accounts, pause upstreams, or adjust Pool policy without reconfiguring every client.
 - **Route with operational context.** Account health, model support, quota evidence, policy, and session continuity all inform account selection.
 - **Inspect what happened without exposing payloads.** Request logs, audit logs, and MCP tools expose sanitized metadata, not prompts, files, tokens, cookies, or raw account secrets.
-- **Run it yourself.** Start locally with Docker Compose or deploy the Helm chart with separate app, worker, scheduler, and migration roles.
+- **Run it yourself.** Start locally with Docker Compose, deploy on Railway in your own account, or use the Helm chart with separate app, worker, scheduler, and migration roles.
 
 ## Who It Is For
 
@@ -96,6 +96,7 @@ For local setup examples, use `http://localhost:4000`. For deployed examples, us
 ## Start Here
 
 - [Quick Start](./getting-started/quick-start/), run locally with Docker Compose, bootstrap the first owner, check health, and create your first Pool API key
+- [Railway deployment](/deployment/railway/), run a public instance without managing a server, with persistent PostgreSQL and migrations before startup
 - [Configuration](./getting-started/configuration/), review release environment variables, runtime URLs, support boundaries, and responsible operation notes
 - [Runtime Routes](./reference/runtime-routes/), choose the right client-facing URL for Codex backend clients, selected SDK clients, or operator MCP hosts
 - [Routing Strategies](./reference/routing-strategies/), understand Pool policy, continuity, quota evidence, and account selection
@@ -126,7 +127,7 @@ These short answer pages restate the public docs for AI search and citation cont
 
 ### Is Codex Pooler a hosted service?
 
-No. The public docs describe a self-hosted application that can run with Docker Compose or the published Helm chart. It is not documented as a hosted provider. Operators are responsible for their own deployment, credentials, infrastructure, and authorized use of upstream accounts.
+No. Codex Pooler is self-hosted software. You can run it with Docker Compose, in your Railway account, or with the published Helm chart. Operators are responsible for their own deployment, credentials, infrastructure costs, and authorized use of upstream accounts.
 
 ### Does Codex Pooler provide full OpenAI API compatibility?
 

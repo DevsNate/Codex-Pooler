@@ -1,0 +1,98 @@
+{
+  "services": {
+    "476ef54b-9954-4023-949e-a2e98ecd53dd": {
+      "deploy": {
+        "healthcheckPath": "/readyz",
+        "preDeployCommand": [
+          "env -u PHX_SERVER /app/bin/codex_pooler eval \"CodexPooler.Release.migrate(); CodexPooler.Release.import_openai_pricing_from_priv()\""
+        ]
+      },
+      "name": "Codex Pooler",
+      "networking": {
+        "serviceDomains": {
+          "<hasDomain>:4000": {
+            "port": 4000
+          }
+        }
+      },
+      "source": {
+        "image": "ghcr.io/icoretech/codex-pooler:0.13.4"
+      },
+      "variables": {
+        "CODEX_POOLER_TOTP_ENCRYPTION_KEY": {
+          "defaultValue": "${{secret(32)}}",
+          "description": "Generated independent 32-character key for operator two-factor secrets. Preserve and back it up with the database."
+        },
+        "CODEX_POOLER_TOTP_KEY_VERSION": {
+          "defaultValue": "v1",
+          "description": "Encryption key version label. Keep v1; changing the label alone does not rotate stored secrets."
+        },
+        "CODEX_POOLER_UPSTREAM_SECRET_KEY": {
+          "defaultValue": "${{secret(32)}}",
+          "description": "Generated independent 32-character key for stored upstream credentials. Preserve and back it up with the database."
+        },
+        "CODEX_POOLER_UPSTREAM_SECRET_KEY_VERSION": {
+          "defaultValue": "v1",
+          "description": "Upstream encryption key version label. Keep v1 unless following an explicit key-rotation procedure."
+        },
+        "DATABASE_URL": {
+          "defaultValue": "postgresql://${{Postgres.POSTGRES_USER}}:${{Postgres.POSTGRES_PASSWORD}}@${{Postgres.RAILWAY_PRIVATE_DOMAIN}}:5432/${{Postgres.POSTGRES_DB}}",
+          "description": "Private connection to the included Postgres service. References resolve automatically; keep the database private."
+        },
+        "OBAN_MODE": {
+          "defaultValue": "all",
+          "description": "Keep all: runs web requests, background jobs and scheduled tasks in this single application service."
+        },
+        "PHX_HOST": {
+          "defaultValue": "${{RAILWAY_PUBLIC_DOMAIN}}",
+          "description": "Generated public hostname. For a custom domain, replace this with that hostname without https:// or a path."
+        },
+        "PHX_SERVER": {
+          "defaultValue": "true",
+          "description": "Keep true to start the HTTP server. The pre-deploy migration command disables it only for its own process."
+        },
+        "POOL_SIZE": {
+          "defaultValue": "10",
+          "description": "Database connections per application replica. Keep 10 for the default single-replica deployment."
+        },
+        "PORT": {
+          "defaultValue": "4000",
+          "description": "Application port. Keep 4000 to match the public domain and readiness check."
+        },
+        "RAILWAY_DEPLOYMENT_DRAINING_SECONDS": {
+          "defaultValue": "135",
+          "description": "Keep 135 seconds to allow the app to drain active requests and finish background-job shutdown."
+        },
+        "SECRET_KEY_BASE": {
+          "defaultValue": "${{secret(64)}}",
+          "description": "Generated 64-character session secret. Preserve it across redeployments and keep a secure backup."
+        }
+      }
+    },
+    "df0fb180-e330-48d9-9a1a-9c8ccd461ab6": {
+      "name": "Postgres",
+      "source": {
+        "image": "postgres:18-alpine"
+      },
+      "variables": {
+        "POSTGRES_DB": {
+          "defaultValue": "codex_pooler",
+          "description": "Database created on first startup. Keep codex_pooler; changing this later does not rename an existing database."
+        },
+        "POSTGRES_PASSWORD": {
+          "defaultValue": "${{secret(32)}}",
+          "description": "Generated independent database password. Preserve it across redeployments; changing a variable alone does not rotate the stored database role password."
+        },
+        "POSTGRES_USER": {
+          "defaultValue": "codex_pooler",
+          "description": "Database owner created on first startup. Keep codex_pooler; the application references this automatically."
+        }
+      },
+      "volumeMounts": {
+        "df0fb180-e330-48d9-9a1a-9c8ccd461ab6": {
+          "mountPath": "/var/lib/postgresql"
+        }
+      }
+    }
+  }
+}

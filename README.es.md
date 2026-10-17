@@ -146,8 +146,8 @@ de la instancia trabajan solo con los Pools que tienen asignados.
   de caché o identificadores de conversación cuando el cliente no las envía directamente
 - 🧱 **Elige quién puede conectarse:** permite, de forma opcional, solicitudes solo
   desde redes autorizadas
-- 🐳 **Ejecútalo en tu propia infraestructura:** empieza con Docker Compose o despliega
-  en Kubernetes a medida que crezcan tus necesidades
+- 🐳 **Ejecútalo en tu propia infraestructura:** usa Docker Compose, despliega en tu
+  cuenta de Railway o utiliza Kubernetes a medida que crezcan tus necesidades
 
 <a id="harness-configuration"></a>
 
@@ -1319,6 +1319,13 @@ Usa un modelo disponible para tu Pool.
 Esta opción ejecuta la imagen publicada de la versión con una base de datos
 Postgres local. Es la forma más rápida de probar Codex Pooler en un portátil
 o un servidor pequeño.
+
+¿No tienes servidor? Despliega en tu propia cuenta de Railway con Postgres persistente y migraciones automáticas ya configurados.
+
+[![Desplegar en Railway](https://railway.com/button.svg)](https://railway.com/deploy/QsYrfa?referralCode=ftyt7p&utm_medium=integration&utm_source=template&utm_campaign=generic)
+
+[Guía de configuración de Railway](https://www.codex-pooler.com/docs/deployment/railway/). El alojamiento de Railway se factura por separado.
+
 Para el uso habitual, ejecuta una versión estable etiquetada y numerada de [GitHub Releases](https://github.com/icoretech/codex-pooler/releases). La etiqueta de imagen `latest` sigue la versión publicada más reciente, pero una etiqueta de versión mantiene la instalación reproducible; ejecuta desde el código fuente solo para [desarrollo local](#local-development).
 
 Requisitos previos:
@@ -1571,6 +1578,7 @@ Elige la opción de despliegue que se ajuste a cómo quieres operar Codex Pooler
 | Opción | Úsala para | Empieza aquí |
 | --- | --- | --- |
 | Docker Compose | Una instalación autohospedada rápida en un portátil, un servidor de laboratorio o un único nodo pequeño | [Guía de despliegue con Docker Compose](https://www.codex-pooler.com/docs/deployment/docker-compose/) |
+| Railway | Una instancia pública en tu propia cuenta de Railway, con Postgres persistente y migraciones automáticas | [Despliegue en un clic](https://railway.com/deploy/QsYrfa?referralCode=ftyt7p&utm_medium=integration&utm_source=template&utm_campaign=generic) · [Guía](https://www.codex-pooler.com/docs/deployment/railway/) |
 | Kubernetes | Instalaciones de producción, ingress gestionado, Postgres externo, métricas y roles de ejecución separados | [Guía de despliegue con Helm](https://www.codex-pooler.com/docs/deployment/helm/) |
 
 La opción de Kubernetes usa el

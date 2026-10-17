@@ -48,6 +48,7 @@ const expectedInventory = {
 		"/operators/admin-ui/",
 		"/operators/alerts/",
 		"/deployment/docker-compose/",
+		"/deployment/railway/",
 		"/deployment/helm/",
 		"/monitoring/overview/",
 		"/monitoring/metrics/",
