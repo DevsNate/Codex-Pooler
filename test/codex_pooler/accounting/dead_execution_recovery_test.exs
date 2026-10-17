@@ -15,6 +15,10 @@ defmodule CodexPooler.Accounting.DeadExecutionRecoveryTest do
   alias Ecto.Adapters.SQL
   alias Ecto.Adapters.SQL.Sandbox
 
+  # These scenarios assert recovery semantics, including progress while a row
+  # stays locked, rather than the publisher's production scheduling budget.
+  @detection_budget_ms 15_000
+
   for kind <- [:direct, :proxy, :local_owner] do
     test "a sensitive #{kind} production ResponseTask stays live beyond the recovery age" do
       setup = accounting_setup()
@@ -98,12 +102,12 @@ defmodule CodexPooler.Accounting.DeadExecutionRecoveryTest do
     assert Repo.reload!(request).status == "in_progress"
 
     assert {:ok, %{dead_execution_attempts_recovered: 1}} =
-             DeadExecutionRecovery.recover_execution_ids([attempt.owner_execution_id], now, timeout: 500, checkout_retries: 0)
+             DeadExecutionRecovery.recover_execution_ids([attempt.owner_execution_id], now, timeout: @detection_budget_ms, checkout_retries: 0)
 
     assert %Request{status: "failed", last_error_code: "dead_execution_recovered", usage_status: "usage_unknown"} = Repo.reload!(request)
     assert %Attempt{status: "failed", network_error_code: "dead_execution_recovered", usage_status: "usage_unknown"} = Repo.reload!(attempt)
     assert Enum.sort(Enum.map(Accounting.list_ledger_entries_for_request(request.id), & &1.entry_kind)) == ["release", "reservation", "settlement"]
-    assert {:ok, %{dead_execution_attempts_recovered: 0}} = DeadExecutionRecovery.recover_published(now)
+    assert {:ok, %{dead_execution_attempts_recovered: 0}} = DeadExecutionRecovery.recover_published(now, timeout: @detection_budget_ms)
     assert length(Accounting.list_ledger_entries_for_request(request.id)) == 3
   end
 
@@ -114,13 +118,13 @@ defmodule CodexPooler.Accounting.DeadExecutionRecoveryTest do
     proof = Repo.get!(CodexPooler.Platform.ExecutionTerminalProof, attempt.owner_execution_id)
     proof |> Ecto.Changeset.change(owner_instance_boot_id: "foreign-boot") |> Repo.update!()
 
-    assert {:ok, %{dead_execution_attempts_recovered: 0}} = DeadExecutionRecovery.recover_published(DateTime.utc_now(), limit: 1)
+    assert {:ok, %{dead_execution_attempts_recovered: 0}} = DeadExecutionRecovery.recover_published(DateTime.utc_now(), limit: 1, timeout: @detection_budget_ms)
     assert Repo.reload!(request).status == "in_progress"
     assert Repo.reload!(live_request).status == "in_progress"
     assert is_nil(Repo.reload!(live_attempt).owner_execution_checked_at)
 
     proof |> Repo.reload!() |> Ecto.Changeset.change(owner_instance_boot_id: attempt.owner_instance_boot_id) |> Repo.update!()
-    assert {:ok, %{dead_execution_attempts_recovered: 1}} = DeadExecutionRecovery.recover_published(DateTime.utc_now(), limit: 1)
+    assert {:ok, %{dead_execution_attempts_recovered: 1}} = DeadExecutionRecovery.recover_published(DateTime.utc_now(), limit: 1, timeout: @detection_budget_ms)
     assert Repo.reload!(live_request).status == "in_progress"
   end
 
@@ -130,7 +134,7 @@ defmodule CodexPooler.Accounting.DeadExecutionRecoveryTest do
     attempt |> Ecto.Changeset.change(replay_generation: 1) |> Repo.update!()
 
     assert {:ok, %{dead_execution_attempts_recovered: 0}} =
-             DeadExecutionRecovery.recover_execution_ids([attempt.owner_execution_id], DateTime.utc_now())
+             DeadExecutionRecovery.recover_execution_ids([attempt.owner_execution_id], DateTime.utc_now(), timeout: @detection_budget_ms)
 
     assert Repo.reload!(request).status == "in_progress"
     assert Enum.map(Accounting.list_ledger_entries_for_request(request.id), & &1.entry_kind) == ["reservation"]
@@ -172,7 +176,7 @@ defmodule CodexPooler.Accounting.DeadExecutionRecoveryTest do
 
     holder_monitor = Process.monitor(holder)
     assert_receive {:older_attempt_locked, ^holder}, 15_000
-    result = UnboxedFixture.run_unboxed(fn -> DeadExecutionRecovery.recover_published(DateTime.utc_now(), limit: 1, timeout: 500) end)
+    result = UnboxedFixture.run_unboxed(fn -> DeadExecutionRecovery.recover_published(DateTime.utc_now(), limit: 1, timeout: @detection_budget_ms) end)
     assert {:ok, %{dead_execution_attempts_recovered: 1}} = result
 
     UnboxedFixture.run_unboxed(fn ->
@@ -183,7 +187,7 @@ defmodule CodexPooler.Accounting.DeadExecutionRecoveryTest do
 
     send(holder, :release)
     assert_receive {:DOWN, ^holder_monitor, :process, ^holder, :normal}, 15_000
-    assert {:ok, %{dead_execution_attempts_recovered: 1}} = UnboxedFixture.run_unboxed(fn -> DeadExecutionRecovery.recover_published(DateTime.utc_now(), limit: 2, timeout: 500) end)
+    assert {:ok, %{dead_execution_attempts_recovered: 1}} = UnboxedFixture.run_unboxed(fn -> DeadExecutionRecovery.recover_published(DateTime.utc_now(), limit: 2, timeout: @detection_budget_ms) end)
   end
 
   defp committed_dead_attempt!(setup, id) do

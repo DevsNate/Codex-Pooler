@@ -17,7 +17,6 @@ defmodule CodexPooler.Upstreams.AccountDeletionQueryPlanTest do
     %{identity: identity, assignment: first} = active_upstream_assignment_fixture()
     {:ok, second} = PoolAssignments.create_pool_assignment(pool_fixture(), identity)
     for assignment <- [first, second], do: assert({:ok, _} = PoolAssignments.delete_pool_assignment(assignment.pool_id, assignment.id))
-    assert {:deleting, _} = Upstreams.delete_account_for_scope(Scope.for_user(owner), identity.id)
 
     # A connection-local history table isolates the planner distribution from the
     # suite's retained statistics. Clone the real indexes; no fabricated index or
@@ -62,6 +61,10 @@ defmodule CodexPooler.Upstreams.AccountDeletionQueryPlanTest do
       assert Enum.any?(plan_nodes(baseline["Plan"]), &(&1["Node Type"] == "Seq Scan" and &1["Relation Name"] == "ledger_entries")), inspect(baseline)
       assert local_blocks(baseline["Plan"]) > 1_000, inspect(baseline)
     end
+
+    # The deletion's SET LOCAL timeout belongs to its transaction. The sandbox
+    # keeps that transaction open, so finish the planner fixture before invoking it.
+    assert {:deleting, _} = Upstreams.delete_account_for_scope(Scope.for_user(owner), identity.id)
 
     receiver = self()
     target_ids = Enum.map([identity.id, first.id, second.id], &Ecto.UUID.dump!/1)

@@ -175,7 +175,10 @@ defmodule CodexPooler.Accounting.ExecutionRecoveryLockOrderTest do
     case rows do
       [[query]] ->
         case Regex.run(~r/FROM "(\w+)"/, query) do
-          [_, relation] -> relation
+          # Activity query text is snapshotted while blocking pids are live;
+          # resample a previous statement instead of treating it as the wait.
+          # The holder's NOWAIT below still proves the request was not locked first.
+          [_, "codex_sessions"] -> "codex_sessions"
           _ -> poll_blocked_relation!(waiter, blocker, deadline)
         end
 
