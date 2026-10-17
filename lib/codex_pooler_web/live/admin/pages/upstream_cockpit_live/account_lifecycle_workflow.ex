@@ -164,8 +164,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLive.AccountLifecycleWorkflow do
   def rename_form(label, attrs \\ %{}, action \\ nil) do
     data = %{account_label: label}
 
-    {%{}, %{account_label: :string}}
-    |> Ecto.Changeset.cast(Map.merge(data, attrs), [:account_label])
+    {data, %{account_label: :string}}
+    |> Ecto.Changeset.cast(attrs, [:account_label])
     |> Ecto.Changeset.validate_required([:account_label])
     |> Map.put(:action, action)
     |> to_form(as: :rename)

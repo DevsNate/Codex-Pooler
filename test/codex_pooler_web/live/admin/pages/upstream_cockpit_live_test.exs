@@ -5749,6 +5749,45 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
            )
   end
 
+  test "cockpit rename validates typing, clearing and retyping before saving", %{conn: conn, scope: scope} do
+    {:ok, pool} = Pools.create_pool(scope, %{slug: "cockpit-rename-validation", name: "Sample Pool"})
+    %{identity: identity} = upstream_assignment_fixture(pool, %{account_label: "Original upstream"})
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams/#{identity.id}")
+
+    view |> element("#cockpit-rename-upstream-account-#{identity.id}") |> render_click()
+
+    view
+    |> form("#cockpit-rename-upstream-account-form", %{"rename" => %{"account_label" => "Updated upstream"}})
+    |> render_change()
+
+    assert Process.alive?(view.pid)
+    assert has_element?(view, "#cockpit-rename-upstream-account-form input[name='rename[account_label]'][value='Updated upstream']")
+    assert has_element?(view, "#cockpit-rename-upstream-account-dialog-eyebrow", "Upstream account · Original upstream")
+    assert Repo.get!(UpstreamIdentity, identity.id).account_label == "Original upstream"
+
+    view
+    |> form("#cockpit-rename-upstream-account-form", %{"rename" => %{"account_label" => ""}})
+    |> render_change()
+
+    assert Process.alive?(view.pid)
+    assert has_element?(view, "#cockpit-rename-upstream-account-dialog[open]")
+    assert has_element?(view, "#cockpit-rename-upstream-account-form", "can't be blank")
+    assert Repo.get!(UpstreamIdentity, identity.id).account_label == "Original upstream"
+
+    view
+    |> form("#cockpit-rename-upstream-account-form", %{"rename" => %{"account_label" => "Updated upstream"}})
+    |> render_change()
+
+    assert Process.alive?(view.pid)
+    refute has_element?(view, "#cockpit-rename-upstream-account-form", "can't be blank")
+
+    view |> form("#cockpit-rename-upstream-account-form") |> render_submit()
+
+    refute has_element?(view, "#cockpit-rename-upstream-account-dialog")
+    assert has_element?(view, "#upstream-cockpit-header", "Updated upstream")
+    assert Repo.get!(UpstreamIdentity, identity.id).account_label == "Updated upstream"
+  end
+
   @tag :cockpit_actions
   test "cockpit actions mutate account, refresh the read model, and keep secrets redacted", %{
     conn: conn,
