@@ -31,6 +31,8 @@ Railway charges for infrastructure; Codex account subscriptions and provider usa
 
 Railway applies a 15-minute duration limit to HTTP requests, including SSE, and a five-minute inactivity limit. Websockets are exempt from those platform limits. Keep this template at one application replica; clustered deployments require additional configuration.
 
+### Deployment Dependencies
+
 - [Deployment and upgrade guide](https://www.codex-pooler.com/docs/deployment/railway/)
 - [Client setup guides](https://www.codex-pooler.com/docs/clients/codex-cli-desktop/)
 - [Source and releases](https://github.com/icoretech/codex-pooler)

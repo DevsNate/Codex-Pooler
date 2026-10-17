@@ -1291,7 +1291,7 @@ console.log(text);
 
 没有服务器？可以部署到自己的 Railway 账户，持久化 Postgres 和自动数据库迁移已预先配置。
 
-[![部署到 Railway](https://railway.com/button.svg)](https://railway.com/deploy/QsYrfa?referralCode=ftyt7p&utm_medium=integration&utm_source=template&utm_campaign=generic)
+[![部署到 Railway](https://railway.com/button.svg)](https://railway.com/deploy/codex-pooler-1?referralCode=ftyt7p&utm_medium=integration&utm_source=template&utm_campaign=generic)
 
 [Railway 设置指南](https://www.codex-pooler.com/docs/deployment/railway/)。Railway 托管费用另计。
 
@@ -1501,7 +1501,7 @@ metadata 加密存储，并且只在邮件发送或凭据测试路径中恢复�
 | 路径 | 适用场景 | 从这里开始 |
 | --- | --- | --- |
 | Docker Compose | 笔记本、实验服务器或小型单节点上的快速自托管安装 | [Docker Compose deployment guide](https://www.codex-pooler.com/docs/deployment/docker-compose/) |
-| Railway | 在自己的 Railway 账户中运行公网实例，使用持久化 Postgres 和自动数据库迁移 | [一键部署](https://railway.com/deploy/QsYrfa?referralCode=ftyt7p&utm_medium=integration&utm_source=template&utm_campaign=generic) · [指南](https://www.codex-pooler.com/docs/deployment/railway/) |
+| Railway | 在自己的 Railway 账户中运行公网实例，使用持久化 Postgres 和自动数据库迁移 | [一键部署](https://railway.com/deploy/codex-pooler-1?referralCode=ftyt7p&utm_medium=integration&utm_source=template&utm_campaign=generic) · [指南](https://www.codex-pooler.com/docs/deployment/railway/) |
 | Kubernetes | 生产安装、托管 ingress、外部 Postgres、metrics，以及独立 runtime roles | [Helm deployment guide](https://www.codex-pooler.com/docs/deployment/helm/) |
 
 Kubernetes 路径使用 iCoreTech Helm repository 中的

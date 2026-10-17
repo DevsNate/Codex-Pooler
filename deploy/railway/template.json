@@ -16,7 +16,7 @@
         }
       },
       "source": {
-        "image": "ghcr.io/icoretech/codex-pooler:0.13.4"
+        "image": "ghcr.io/icoretech/codex-pooler:0.13.5"
       },
       "variables": {
         "CODEX_POOLER_TOTP_ENCRYPTION_KEY": {

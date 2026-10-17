@@ -1322,7 +1322,7 @@ o un servidor pequeño.
 
 ¿No tienes servidor? Despliega en tu propia cuenta de Railway con Postgres persistente y migraciones automáticas ya configurados.
 
-[![Desplegar en Railway](https://railway.com/button.svg)](https://railway.com/deploy/QsYrfa?referralCode=ftyt7p&utm_medium=integration&utm_source=template&utm_campaign=generic)
+[![Desplegar en Railway](https://railway.com/button.svg)](https://railway.com/deploy/codex-pooler-1?referralCode=ftyt7p&utm_medium=integration&utm_source=template&utm_campaign=generic)
 
 [Guía de configuración de Railway](https://www.codex-pooler.com/docs/deployment/railway/). El alojamiento de Railway se factura por separado.
 
@@ -1578,7 +1578,7 @@ Elige la opción de despliegue que se ajuste a cómo quieres operar Codex Pooler
 | Opción | Úsala para | Empieza aquí |
 | --- | --- | --- |
 | Docker Compose | Una instalación autohospedada rápida en un portátil, un servidor de laboratorio o un único nodo pequeño | [Guía de despliegue con Docker Compose](https://www.codex-pooler.com/docs/deployment/docker-compose/) |
-| Railway | Una instancia pública en tu propia cuenta de Railway, con Postgres persistente y migraciones automáticas | [Despliegue en un clic](https://railway.com/deploy/QsYrfa?referralCode=ftyt7p&utm_medium=integration&utm_source=template&utm_campaign=generic) · [Guía](https://www.codex-pooler.com/docs/deployment/railway/) |
+| Railway | Una instancia pública en tu propia cuenta de Railway, con Postgres persistente y migraciones automáticas | [Despliegue en un clic](https://railway.com/deploy/codex-pooler-1?referralCode=ftyt7p&utm_medium=integration&utm_source=template&utm_campaign=generic) · [Guía](https://www.codex-pooler.com/docs/deployment/railway/) |
 | Kubernetes | Instalaciones de producción, ingress gestionado, Postgres externo, métricas y roles de ejecución separados | [Guía de despliegue con Helm](https://www.codex-pooler.com/docs/deployment/helm/) |
 
 La opción de Kubernetes usa el

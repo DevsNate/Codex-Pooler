@@ -1236,7 +1236,7 @@ Pool で利用可能なモデルを使用してください。
 
 サーバーがない場合は、自分の Railway アカウントにデプロイできます。永続化された Postgres と自動マイグレーションは設定済みです。
 
-[![Railway にデプロイ](https://railway.com/button.svg)](https://railway.com/deploy/QsYrfa?referralCode=ftyt7p&utm_medium=integration&utm_source=template&utm_campaign=generic)
+[![Railway にデプロイ](https://railway.com/button.svg)](https://railway.com/deploy/codex-pooler-1?referralCode=ftyt7p&utm_medium=integration&utm_source=template&utm_campaign=generic)
 
 [Railway セットアップガイド](https://www.codex-pooler.com/docs/deployment/railway/)。Railway のホスティング料金は別途かかります。
 
@@ -1393,7 +1393,7 @@ Codex Pooler の運用方法に合ったデプロイ方法を選んでくださ�
 | 方法 | 用途 | ガイド |
 | --- | --- | --- |
 | Docker Compose | ノート PC、検証用サーバー、小規模な単一ノードへの手軽なセルフホスト導入 | [Docker Compose デプロイガイド](https://www.codex-pooler.com/docs/deployment/docker-compose/) |
-| Railway | 自分の Railway アカウントで公開インスタンスを運用し、永続化された Postgres と自動マイグレーションを利用 | [ワンクリックデプロイ](https://railway.com/deploy/QsYrfa?referralCode=ftyt7p&utm_medium=integration&utm_source=template&utm_campaign=generic) · [ガイド](https://www.codex-pooler.com/docs/deployment/railway/) |
+| Railway | 自分の Railway アカウントで公開インスタンスを運用し、永続化された Postgres と自動マイグレーションを利用 | [ワンクリックデプロイ](https://railway.com/deploy/codex-pooler-1?referralCode=ftyt7p&utm_medium=integration&utm_source=template&utm_campaign=generic) · [ガイド](https://www.codex-pooler.com/docs/deployment/railway/) |
 | Kubernetes | 本番環境、管理された Ingress、外部 Postgres、メトリクス、ランタイムロールの分離 | [Helm デプロイガイド](https://www.codex-pooler.com/docs/deployment/helm/) |
 
 Kubernetes へのデプロイには、iCoreTech Helm リポジトリの [`icoretech/codex-pooler` チャート](https://github.com/icoretech/helm/tree/main/charts/codex-pooler)を使用します。このチャートは 1 つのリリースイメージを、ウェブ、ワーカー、スケジューラー、マイグレーションの独立したロールとして実行します。実際の導入では、チャートの `--version` を固定してください。チャートはデフォルトで、対応する `appVersion` を `image.tag` に使用します。
