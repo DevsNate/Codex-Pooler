@@ -269,6 +269,50 @@ defmodule CodexPoolerWeb.Browser.BrowserSecurityHeadersTest do
     refute conn.status == 301
   end
 
+  for method <- [:get, :head], path <- ["/healthz", "/readyz"] do
+    test "production Plug.SSL serves #{method} #{path} HTTP health probes without forwarded headers" do
+      opts = Plug.SSL.init(production_force_ssl_options!())
+
+      conn =
+        unquote(method)
+        |> build_conn(unquote(path))
+        |> Map.put(:host, "healthcheck.example.com")
+        |> Plug.SSL.call(opts)
+
+      refute conn.halted
+      assert conn.scheme == :http
+      assert get_resp_header(conn, "location") == []
+
+      conn = CodexPoolerWeb.Endpoint.call(conn, CodexPoolerWeb.Endpoint.init([]))
+
+      assert conn.status == 200
+
+      if unquote(method) == :head do
+        assert conn.resp_body == ""
+      else
+        expected_status = if unquote(path) == "/healthz", do: "ok", else: "ready"
+        assert json_response(conn, 200) == %{"status" => expected_status}
+      end
+    end
+  end
+
+  for method <- [:get, :head],
+      path <- ["/healthz-extra", "/healthz/extra", "/readyz-extra", "/readyz/extra", "/admin/pools", "/v1/responses"] do
+    test "production Plug.SSL still redirects #{method} #{path} over HTTP" do
+      opts = Plug.SSL.init(production_force_ssl_options!())
+
+      conn =
+        unquote(method)
+        |> build_conn(unquote(path))
+        |> Map.put(:host, "healthcheck.example.com")
+        |> Plug.SSL.call(opts)
+
+      assert conn.halted
+      assert conn.status == 301
+      assert get_resp_header(conn, "location") == ["https://healthcheck.example.com" <> unquote(path)]
+    end
+  end
+
   test "Plug.SSL still redirects non-websocket forwarded HTTP requests" do
     opts =
       Plug.SSL.init(
