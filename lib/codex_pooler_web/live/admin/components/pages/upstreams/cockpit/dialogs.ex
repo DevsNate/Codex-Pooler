@@ -122,13 +122,14 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitComponents.Dialogs do
     <dialog
       :if={@account && @form}
       id="cockpit-rename-upstream-account-dialog"
+      aria-labelledby="cockpit-rename-upstream-account-dialog-title cockpit-rename-upstream-account-dialog-eyebrow"
       class="modal modal-bottom overflow-x-hidden sm:modal-middle"
       open
     >
       <div class="modal-box sm:max-w-xl border border-base-300 bg-base-100 p-0 shadow-2xl">
         <div class="border-b border-base-300 px-5 py-4 sm:px-6 sm:py-5">
-          <p class="text-sm font-semibold uppercase tracking-wide text-primary">Upstream account</p>
-          <h2 class="mt-1 text-2xl font-bold text-base-content">Rename upstream account</h2>
+          <p id="cockpit-rename-upstream-account-dialog-eyebrow" class="break-words text-xs font-semibold uppercase tracking-wide text-primary">Upstream account · {@account.label}</p>
+          <h2 id="cockpit-rename-upstream-account-dialog-title" class="mt-1 text-2xl font-bold text-base-content">Rename upstream account</h2>
           <p class="mt-2 text-sm leading-6 text-base-content/70">
             Update the operator label shown on this page and on the upstream account list.
           </p>

@@ -31,7 +31,15 @@ defmodule CodexPoolerWeb.Admin.ProviderCreditsLiveTest do
     render_click(element(cockpit, "#provider-credits-policy-open"))
     assert has_element?(cockpit, "#provider-credits-enabled[checked]")
     assert has_element?(list_b, "#provider-credits-enabled[checked]")
-    assert has_element?(cockpit, "#provider-credits-policy-dialog-title", "Provider credits")
+
+    for view <- [cockpit, list_b] do
+      assert has_element?(view, "#provider-credits-policy-dialog[aria-labelledby='provider-credits-policy-dialog-title provider-credits-policy-dialog-eyebrow']")
+      assert view |> element("#provider-credits-policy-dialog-title") |> render() |> LazyHTML.from_fragment() |> LazyHTML.text() |> String.trim() == "Provider credits"
+      assert has_element?(view, "#provider-credits-policy-dialog-eyebrow", "Upstream account · Synthetic provider credits")
+    end
+
+    assert has_element?(list_a, "#upstream-account-#{identity.id}-limit-weekly-observations-dialog-eyebrow", "Weekly · Synthetic provider credits")
+    assert has_element?(cockpit, "#upstream-quota-limit-weekly-observations-dialog-eyebrow", "Weekly · Synthetic provider credits")
     assert has_element?(cockpit, "#provider-credits-policy-dialog-footer #provider-credits-save[type='submit'][form='provider-credits-policy-form']")
     refute has_element?(cockpit, "#provider-credits-policy-form #provider-credits-save")
     assert has_element?(cockpit, "#provider-credits-observation-details:not([open])")

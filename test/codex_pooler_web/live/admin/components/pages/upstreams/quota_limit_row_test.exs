@@ -49,6 +49,10 @@ defmodule CodexPoolerWeb.Admin.QuotaLimitRowTest do
     assert LazyHTML.query(document, "#quota-row-reset") |> LazyHTML.text() != ""
     assert LazyHTML.query(document, "#quota-row-observations-dialog[data-preserve-open][data-quota-dialog-preserve]") != []
     assert LazyHTML.query(document, "#quota-row-observations-dialog-title[tabindex='-1'][data-dialog-focus-fallback]") != []
+    assert LazyHTML.query(document, "#quota-row-observations-dialog-title") |> LazyHTML.text() |> String.trim() == "Quota evidence"
+    assert LazyHTML.query(document, "#quota-row-observations-dialog-eyebrow") |> LazyHTML.text() |> String.trim() == "Weekly · Sample <upstream> & account"
+    assert LazyHTML.query(document, "#quota-row-observations-dialog") |> LazyHTML.attribute("aria-labelledby") == ["quota-row-observations-dialog-title quota-row-observations-dialog-eyebrow"]
+    assert Enum.empty?(LazyHTML.query(document, "#quota-row-observations-dialog-eyebrow upstream"))
     assert LazyHTML.query(document, "#quota-row-observations-dialog-scroll[data-preserve-scroll]") != []
     assert LazyHTML.query(document, "[data-selected='true'] [data-role='last-verified-quota']") |> LazyHTML.text() == "Last verified quota"
     assert LazyHTML.query(document, "[data-selected='true'] summary") |> LazyHTML.text() =~ "fresh"
@@ -163,6 +167,7 @@ defmodule CodexPoolerWeb.Admin.QuotaLimitRowTest do
     html =
       render_component(&QuotaLimitRow.quota_limit_row/1, %{
         id: "quota-row-baseline",
+        account_label: "Sample upstream",
         limit: %{
           label: "Weekly",
           percent: Decimal.new(75),
@@ -241,6 +246,7 @@ defmodule CodexPoolerWeb.Admin.QuotaLimitRowTest do
     baseline_html =
       render_component(&QuotaLimitRow.quota_limit_row/1, %{
         id: "quota-row-baseline-structure",
+        account_label: "Sample upstream",
         limit: %{
           label: "Weekly",
           percent: Decimal.new(0),
@@ -257,6 +263,7 @@ defmodule CodexPoolerWeb.Admin.QuotaLimitRowTest do
     conflict_html =
       render_component(&QuotaLimitRow.quota_limit_row/1, %{
         id: "quota-row-conflict",
+        account_label: "Sample upstream",
         limit: %{
           label: "Weekly",
           percent: Decimal.new(0),
@@ -385,6 +392,7 @@ defmodule CodexPoolerWeb.Admin.QuotaLimitRowTest do
       html =
         render_component(&QuotaLimitRow.quota_limit_row/1, %{
           id: id,
+          account_label: "Sample upstream",
           limit: %{
             label: "Weekly",
             percent: Decimal.new(100),
@@ -449,7 +457,7 @@ defmodule CodexPoolerWeb.Admin.QuotaLimitRowTest do
       |> Enum.find(&is_binary(&1.key))
 
     html =
-      render_component(&QuotaLimitRow.quota_limit_row/1, %{id: "quota-row-redacted", limit: limit})
+      render_component(&QuotaLimitRow.quota_limit_row/1, %{id: "quota-row-redacted", account_label: "Sample upstream", limit: limit})
 
     assert html =~ "Additional limit 5h"
     refute html =~ unsafe_limit_name
@@ -477,6 +485,7 @@ defmodule CodexPoolerWeb.Admin.QuotaLimitRowTest do
       |> Enum.map_join(fn limit ->
         render_component(&QuotaLimitRow.quota_limit_row/1, %{
           id: "quota-row-#{limit.key}",
+          account_label: "Sample upstream",
           limit: limit
         })
       end)
@@ -508,12 +517,14 @@ defmodule CodexPoolerWeb.Admin.QuotaLimitRowTest do
     exhausted_html =
       render_component(&QuotaLimitRow.quota_limit_row/1, %{
         id: "quota-row-exhausted",
+        account_label: "Sample upstream",
         limit: stale_limit(Decimal.new(0), 0, "0%")
       })
 
     markerless_html =
       render_component(&QuotaLimitRow.quota_limit_row/1, %{
         id: "quota-row-markerless",
+        account_label: "Sample upstream",
         limit: %{
           label: "Weekly",
           percent: Decimal.new(100),
@@ -556,7 +567,7 @@ defmodule CodexPoolerWeb.Admin.QuotaLimitRowTest do
   end
 
   defp render_quota_row(limit) do
-    render_component(&QuotaLimitRow.quota_limit_row/1, %{id: "quota-row", limit: limit})
+    render_component(&QuotaLimitRow.quota_limit_row/1, %{id: "quota-row", account_label: "Sample <upstream> & account", limit: limit})
   end
 
   defp stale_limit(percent, percent_value, percent_label) do

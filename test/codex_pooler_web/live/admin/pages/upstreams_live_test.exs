@@ -2351,6 +2351,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     assert has_element?(view, "#saved-reset-policy-dialog")
     assert has_element?(view, "#saved-reset-policy-auto-redeem-enabled")
+    assert has_element?(view, "#saved-reset-policy-dialog[aria-labelledby='saved-reset-policy-dialog-title saved-reset-policy-dialog-eyebrow']")
+    assert view |> element("#saved-reset-policy-dialog-title") |> render() |> LazyHTML.from_fragment() |> LazyHTML.text() |> String.trim() == "Saved reset bank"
+    assert has_element?(view, "#saved-reset-policy-dialog-eyebrow", "Codex saved resets · Saved Reset Policy Codex")
     assert has_element?(view, "#saved-reset-policy-trigger-mode")
     assert has_element?(view, "#saved-reset-policy-quota-threshold-percent")
     assert has_element?(view, "#saved-reset-policy-min-blocked-minutes")
@@ -4718,7 +4721,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     |> element("#rename-upstream-account-#{identity.id}")
     |> render_click()
 
-    assert has_element?(view, "#rename-upstream-account-dialog[open]", "Rename upstream account")
+    assert has_element?(view, "#rename-upstream-account-dialog[open][aria-labelledby='rename-upstream-account-dialog-title rename-upstream-account-dialog-eyebrow']")
+    assert view |> element("#rename-upstream-account-dialog-title") |> render() |> LazyHTML.from_fragment() |> LazyHTML.text() |> String.trim() == "Rename upstream account"
+    assert has_element?(view, "#rename-upstream-account-dialog-eyebrow", "Upstream account · Original Codex")
     assert has_element?(view, "#rename-upstream-account-form")
     assert has_element?(view, "#rename_account_label[value='Original Codex']")
     assert_admin_dialog_docs_link(view, "rename-upstream-account-dialog-footer")

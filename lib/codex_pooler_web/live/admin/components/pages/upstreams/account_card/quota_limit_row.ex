@@ -6,6 +6,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard.QuotaLimitRow 
   alias CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard.QuotaObservationsDialog
 
   attr :id, :string, required: true
+  attr :account_label, :string, required: true
   attr :limit, :map, required: true
 
   def quota_limit_row(assigns) do
@@ -100,6 +101,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard.QuotaLimitRow 
     <QuotaObservationsDialog.dialog
       :if={Map.get(@limit, :observations, []) != []}
       id={"#{@id}-observations-dialog"}
+      account_label={@account_label}
       limit={@limit}
     />
     """

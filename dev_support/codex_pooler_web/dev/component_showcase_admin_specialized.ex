@@ -40,6 +40,7 @@ defmodule CodexPoolerWeb.Dev.ComponentShowcaseAdminSpecialized do
             <QuotaLimitRow.quota_limit_row
               :for={limit <- @quota_limits}
               id={"showcase-quota-#{limit.id}"}
+              account_label={@account.label}
               limit={limit}
             />
           </div>

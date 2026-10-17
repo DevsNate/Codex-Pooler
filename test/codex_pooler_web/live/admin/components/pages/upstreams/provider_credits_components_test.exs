@@ -273,7 +273,7 @@ defmodule CodexPoolerWeb.Admin.ProviderCreditsComponentsTest do
     ~H"""
     <ProviderCreditsComponents.provider_credits_summary id="credits" summary={@summary}>
       <:included_windows>
-        <QuotaLimitRow.quota_limit_row id="included-weekly" limit={@limit} />
+        <QuotaLimitRow.quota_limit_row id="included-weekly" account_label="Sample upstream" limit={@limit} />
       </:included_windows>
     </ProviderCreditsComponents.provider_credits_summary>
     """

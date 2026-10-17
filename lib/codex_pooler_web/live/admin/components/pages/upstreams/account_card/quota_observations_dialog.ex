@@ -5,6 +5,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard.QuotaObservati
   @type command :: %Phoenix.LiveView.JS{}
 
   attr :id, :string, required: true
+  attr :account_label, :string, required: true
   attr :limit, :map, required: true
 
   def dialog(assigns) do
@@ -12,7 +13,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard.QuotaObservati
     <dialog
       id={@id}
       class="quota-observations-dialog modal modal-bottom overflow-x-hidden sm:modal-middle"
-      aria-labelledby={"#{@id}-title"}
+      aria-labelledby={"#{@id}-title #{@id}-eyebrow"}
       aria-describedby={"#{@id}-description"}
       aria-modal="true"
       data-preserve-open
@@ -23,7 +24,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard.QuotaObservati
         class="quota-observations-dialog-panel modal-box flex max-h-[85dvh] w-full flex-col overflow-hidden sm:max-w-xl border border-base-300 bg-base-100 p-0 shadow-2xl"
       >
         <header class="shrink-0 border-b border-base-300 px-5 py-4">
-          <p class="text-xs font-semibold uppercase tracking-wide text-primary">{@limit.label}</p>
+          <p id={"#{@id}-eyebrow"} class="break-words text-xs font-semibold uppercase tracking-wide text-primary">{@limit.label} · {@account_label}</p>
           <h2 id={"#{@id}-title"} tabindex="-1" data-dialog-focus-fallback class="mt-1 text-xl font-bold text-base-content">
             Quota evidence
           </h2>

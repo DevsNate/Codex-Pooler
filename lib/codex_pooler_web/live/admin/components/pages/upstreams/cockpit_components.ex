@@ -116,7 +116,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitComponents do
                 saved_reset_policy_form={@saved_reset_policy_form}
                 datetime_preferences={@datetime_preferences}
               />
-              <UpstreamPageComponents.provider_credits_policy_dialog account={@editing_provider_credits_policy} form={@provider_credits_policy_form} />
+              <UpstreamPageComponents.provider_credits_policy_dialog account={@editing_provider_credits_policy} account_label={@editing_provider_credits_policy && @editing_provider_credits_policy.header.title} form={@provider_credits_policy_form} />
               <Charts.request_section
                 cockpit={@cockpit}
                 refresh_data_message={@refresh_data_message}

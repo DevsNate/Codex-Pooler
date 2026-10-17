@@ -186,6 +186,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard do
                 <QuotaLimitRow.quota_limit_row
                   :for={limit <- @reported_quota_limits}
                   id={"upstream-account-#{@account.identity.id}-limit-#{limit.key}"}
+                  account_label={@account.label}
                   limit={limit}
                 />
                 <ProviderCreditsComponents.provider_credits_summary

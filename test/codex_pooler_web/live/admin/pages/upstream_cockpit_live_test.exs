@@ -5821,7 +5821,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
            )
 
     view |> element("#cockpit-rename-upstream-account-#{identity.id}") |> render_click()
-    assert has_element?(view, "#cockpit-rename-upstream-account-dialog[open]")
+    assert has_element?(view, "#cockpit-rename-upstream-account-dialog[open][aria-labelledby='cockpit-rename-upstream-account-dialog-title cockpit-rename-upstream-account-dialog-eyebrow']")
+    assert view |> element("#cockpit-rename-upstream-account-dialog-title") |> render() |> LazyHTML.from_fragment() |> LazyHTML.text() |> String.trim() == "Rename upstream account"
+    assert has_element?(view, "#cockpit-rename-upstream-account-dialog-eyebrow", "Upstream account · Action Target Codex")
     assert_admin_dialog_docs_link(view, "cockpit-rename-upstream-account-dialog-footer")
 
     view

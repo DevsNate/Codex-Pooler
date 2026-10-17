@@ -52,6 +52,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitComponents.Charts do
         <QuotaLimitRow.quota_limit_row
           :for={limit <- @reported_limits}
           id={"upstream-quota-limit-#{limit.key}"}
+          account_label={@cockpit.header.title}
           limit={limit}
         />
         <ProviderCreditsComponents.provider_credits_summary

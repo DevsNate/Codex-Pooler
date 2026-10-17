@@ -105,7 +105,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
         confirming_saved_reset_redemption={@confirming_saved_reset_redemption}
         datetime_preferences={@datetime_preferences}
       />
-      <.provider_credits_policy_dialog account={@editing_provider_credits_policy} form={@provider_credits_policy_form} />
+      <.provider_credits_policy_dialog account={@editing_provider_credits_policy} account_label={@editing_provider_credits_policy && @editing_provider_credits_policy.label} form={@provider_credits_policy_form} />
 
       <section id="upstream-account-surface" class="grid min-w-0 gap-4">
         <.upstream_filter_form
@@ -499,15 +499,16 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
     <dialog
       :if={@account && @form}
       id="rename-upstream-account-dialog"
+      aria-labelledby="rename-upstream-account-dialog-title rename-upstream-account-dialog-eyebrow"
       class="modal modal-bottom overflow-x-hidden sm:modal-middle"
       open
     >
       <div class="modal-box sm:max-w-xl border border-base-300 bg-base-100 p-0 shadow-2xl">
         <div class="border-b border-base-300 px-5 py-4 sm:px-6 sm:py-5">
-          <p class="text-sm font-semibold uppercase tracking-wide text-primary">
-            Upstream account
+          <p id="rename-upstream-account-dialog-eyebrow" class="break-words text-xs font-semibold uppercase tracking-wide text-primary">
+            Upstream account · {@account.label}
           </p>
-          <h2 class="mt-1 text-2xl font-bold text-base-content">Rename upstream account</h2>
+          <h2 id="rename-upstream-account-dialog-title" class="mt-1 text-2xl font-bold text-base-content">Rename upstream account</h2>
           <p class="mt-2 text-sm leading-6 text-base-content/70">
             Update the operator label shown for this upstream account.
           </p>
@@ -634,12 +635,14 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
   attr :account, :map, default: nil
   attr :form, :any, default: nil
 
+  attr :account_label, :string, required: true
+
   def provider_credits_policy_dialog(assigns) do
     ~H"""
-    <dialog :if={@account && @form} id="provider-credits-policy-dialog" class="modal modal-bottom overflow-x-hidden sm:modal-middle" aria-labelledby="provider-credits-policy-dialog-title" aria-modal="true" phx-window-keydown="cancel_provider_credits_policy" phx-key="escape" phx-remove={JS.pop_focus()} open>
+    <dialog :if={@account && @form} id="provider-credits-policy-dialog" class="modal modal-bottom overflow-x-hidden sm:modal-middle" aria-labelledby="provider-credits-policy-dialog-title provider-credits-policy-dialog-eyebrow" aria-modal="true" phx-window-keydown="cancel_provider_credits_policy" phx-key="escape" phx-remove={JS.pop_focus()} open>
       <.focus_wrap id="provider-credits-policy-dialog-panel" class="modal-box sm:max-w-xl border border-base-300 bg-base-100 p-0 shadow-2xl" phx-mounted={JS.focus(to: "#provider-credits-enabled")}>
         <div class="border-b border-base-300 px-5 py-4">
-          <p class="text-xs font-semibold uppercase tracking-wide text-primary">Upstream account</p>
+          <p id="provider-credits-policy-dialog-eyebrow" class="break-words text-xs font-semibold uppercase tracking-wide text-primary">Upstream account · {@account_label}</p>
           <h2 id="provider-credits-policy-dialog-title" class="mt-1 text-xl font-bold text-base-content">Provider credits</h2>
           <p class="mt-1 text-xs leading-5 text-base-content/60">Balance and admission policy for every Pool using this upstream.</p>
         </div>
@@ -683,6 +686,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
     <dialog
       :if={@account && @form}
       id="saved-reset-policy-dialog"
+      aria-labelledby="saved-reset-policy-dialog-title saved-reset-policy-dialog-eyebrow"
       class="modal modal-bottom overflow-x-hidden sm:modal-middle"
       open
     >
@@ -691,10 +695,10 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
         class="modal-box sm:max-w-xl border border-base-300 bg-base-100 p-0 shadow-2xl"
       >
         <div class="border-b border-base-300 px-5 py-4">
-          <p class="text-xs font-semibold uppercase tracking-wide text-primary">
-            Codex saved resets
+          <p id="saved-reset-policy-dialog-eyebrow" class="break-words text-xs font-semibold uppercase tracking-wide text-primary">
+            Codex saved resets · {@account.label}
           </p>
-          <h2 class="mt-1 text-xl font-bold text-base-content">Saved reset bank</h2>
+          <h2 id="saved-reset-policy-dialog-title" class="mt-1 text-xl font-bold text-base-content">Saved reset bank</h2>
           <p class="mt-1 text-xs leading-5 text-base-content/60">
             Account-level quota recovery capacity: spent automatically by policy or through one queued manual attempt.
           </p>
