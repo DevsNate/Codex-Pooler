@@ -4,7 +4,9 @@ The [Railway deployment guide](https://www.codex-pooler.com/docs/deployment/rail
 
 This directory maintains [the marketplace overview](marketplace.md). The deployment configuration lives in Railway's template composer. Railway uses that saved configuration when someone deploys the template; no repository manifest is imported or synchronized automatically.
 
-Before publishing a template update, select the intended release image and review the variables, services, networking, and lifecycle settings in the composer. Apply the changes and inspect the saved configuration. Test a fresh deployment from that exact template, including migration failure, recovery, and persistence across application and database restarts. Record the resolved image digest with the acceptance results. A locally uploaded candidate build does not certify a different published image.
+The application source is `ghcr.io/icoretech/codex-pooler:latest`. Stable release publication updates this tag, so the composer does not need an image edit for every release. New required variables, service changes, or lifecycle commands still require a template review and update; they are not supplied by the image tag.
+
+Before publishing a template configuration update, review the variables, services, networking, and lifecycle settings in the composer. Apply the changes and inspect the saved configuration. Test a fresh deployment from that exact template, including migration failure, recovery, and persistence across application and database restarts. Record the resolved image digest with the acceptance results. A locally uploaded candidate build does not certify a different published image.
 
 Keep the application at one replica with Serverless disabled. Preserve all generated secrets and the PostgreSQL volume when upgrading an existing installation. The application pre-deploy command runs migrations and pricing import; the `/readyz` check must return HTTP 200 to Railway's internal healthcheck before the deployment becomes active.
 

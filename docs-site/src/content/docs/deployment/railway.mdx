@@ -39,7 +39,7 @@ The [quick start](/getting-started/quick-start/) shows the Pool, upstream, and k
 
 | Component | Preset |
 | --- | --- |
-| Application | Tagged Codex Pooler release image; one replica; no application volume |
+| Application | `ghcr.io/icoretech/codex-pooler:latest`, following stable releases; one replica; no application volume |
 | Database | `postgres:18-alpine`, with a persistent volume at `/var/lib/postgresql` |
 | Database connection | Private network between the two services |
 | HTTPS | Generated Railway domain pointing to application port `4000` |
@@ -122,9 +122,11 @@ Preserve all three application secrets and their version labels in secure storag
 ## Upgrade the existing instance
 
 1. Back up PostgreSQL and confirm that the matching encryption keys are available.
-2. Change the application image to the desired tagged stable release from [GitHub Releases](https://github.com/icoretech/codex-pooler/releases). Keep the existing database, volume, and secrets.
-3. Deploy and wait for migrations, pricing import, and readiness to succeed.
+2. Review the changes in [GitHub Releases](https://github.com/icoretech/codex-pooler/releases). Keep `ghcr.io/icoretech/codex-pooler:latest` to follow stable releases, or select an exact stable version tag to control the version you deploy. Keep the existing database, volume, and secrets; apply any required configuration changes from the release instructions.
+3. Deploy from the configured source to pull the image again. With the Railway CLI linked to the correct project and environment, run `railway redeploy --from-source --service 'Codex Pooler'`. Wait for migrations, pricing import, and readiness to succeed.
 4. Check owner sign-in, Pool configuration, and a client request.
+
+The `latest` tag follows stable image releases; it does not itself enable automatic updates or apply new template variables and service settings to existing installations. An ordinary redeploy repeats the previous deployment; use `--from-source` to fetch the configured image again.
 
 Upgrade the existing service, rather than deploying the template again into a new project. Rolling back an application image does not reverse database migrations; recovery may require a compatible database backup and its matching secrets. Changing the PostgreSQL major version requires its own database upgrade procedure.
 
