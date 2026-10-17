@@ -1098,6 +1098,7 @@ verified in the local runtime with gold Pro, neutral Free and separate plan hues
   btn-square` ellipsis trigger (`aria-label="Actions for {label}"`) and a
   `menu dropdown-content z-20 mt-2 w-60 rounded-box border border-base-300
   bg-base-100 p-2 shadow-xl` list. Items are full-width icon+label rows.
+- **Stacking:** the upstream action-menu root becomes `z-50` while it contains focus, above the preceding plan diagnostic tooltip. The tooltip retains normal hover, focus and touch access after the menu closes; neither control may intercept the other's active actions.
 - **Variants:** `:secondary` (neutral), `:warning` (Pause), `:positive`
   (Reactivate), `:danger` (Delete) — text-toned with `hover:bg-{tone}/10`;
   disabled state drops to `text-base-content/35` with `pointer-events-none`.

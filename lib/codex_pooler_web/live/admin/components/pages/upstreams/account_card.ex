@@ -650,7 +650,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard do
 
     ~H"""
     <div
-      class="dropdown dropdown-end inline-block shrink-0 self-center"
+      class="dropdown dropdown-end relative inline-block shrink-0 self-center focus-within:z-50"
       data-role="upstream-account-actions"
     >
       <button
