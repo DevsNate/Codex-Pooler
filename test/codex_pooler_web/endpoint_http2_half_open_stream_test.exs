@@ -37,6 +37,7 @@ defmodule CodexPoolerWeb.EndpointHttp2HalfOpenStreamTest do
   @headers 0x1
   @rst_stream 0x3
   @settings 0x4
+  @ping 0x6
   @goaway 0x7
 
   @end_stream 0x1
@@ -49,12 +50,8 @@ defmodule CodexPoolerWeb.EndpointHttp2HalfOpenStreamTest do
   @aborted_stream_id 1
   @barrier_stream_id 3
 
-  # The connection-idle backstop is a scenario budget: it is the behaviour under
-  # test, and any value proves it. It must still leave enough time for Bandit's
-  # request process to send the response headers and first chunk while the
-  # suite saturates the machine; the plug does no work, so half a second is still
-  # orders of magnitude above that. Everything else here is failure detection
-  # and stays above that scenario budget.
+  # Arm this scenario budget only after the peer has observed the abandoned
+  # stream. Request setup and scheduler latency must not consume the idle window.
   @idle_timeout_ms 500
   @recv_timeout 15_000
 
@@ -98,7 +95,7 @@ defmodule CodexPoolerWeb.EndpointHttp2HalfOpenStreamTest do
       # emit a test-only message after response output. Once that process is down,
       # the error path has run and any frame it would emit is queued ahead of the
       # ordered barrier below.
-      assert_receive {:mid_stream_failure, stream_pid}, @recv_timeout
+      assert_receive {:mid_stream_failure, stream_pid, _connection_pid}, @recv_timeout
       monitor_ref = Process.monitor(stream_pid)
       assert_receive {:DOWN, ^monitor_ref, :process, ^stream_pid, _reason}, @recv_timeout
 
@@ -146,13 +143,38 @@ defmodule CodexPoolerWeb.EndpointHttp2HalfOpenStreamTest do
       # it with GOAWAY (deps/bandit/lib/bandit/http2/handler.ex:56-63). Any
       # multiplexed traffic on the same connection keeps resetting that timer, so
       # it is not a per-stream remedy.
-      port = start_listener(thousand_island_options: [read_timeout: @idle_timeout_ms])
+      attach_mid_stream_failure_handler()
+      port = start_listener(thousand_island_options: [read_timeout: :infinity])
       socket = connect_h2c(port)
+
+      # Confirm the connection exists, then force setup to outlast the scenario
+      # timeout. This models the client being descheduled after the preface;
+      # starting the idle timer at listener startup loses the response headers.
+      assert {:ok, %{type: @settings, stream_id: 0} = settings} = recv_frame(socket)
+      assert settings_to_ack?(settings)
+      :ok = :gen_tcp.send(socket, frame(@settings, @ack, 0, ""))
+      Process.sleep(@idle_timeout_ms + 250)
 
       send_request(socket, @aborted_stream_id, "/stream-then-raise", port)
 
-      frames = collect_until_closed(socket)
+      assert_receive {:mid_stream_failure, stream_pid, connection_pid}, @recv_timeout
+      stream_monitor = Process.monitor(stream_pid)
+      assert_receive {:DOWN, ^stream_monitor, :process, ^stream_pid, _reason}, @recv_timeout
+
+      send_request(socket, @barrier_stream_id, "/barrier", port)
+      response_frames = collect_until_end_of_stream(socket, @barrier_stream_id)
+
+      connection_monitor = Process.monitor(connection_pid)
+      arm_idle_timeout(socket, connection_pid)
+      frames = response_frames ++ collect_until_closed(socket)
+
+      assert_receive {:DOWN, ^connection_monitor, :process, ^connection_pid, {:shutdown, :read_timeout}},
+                     @recv_timeout
+
       aborted = Enum.filter(frames, &(&1.stream_id == @aborted_stream_id))
+
+      assert Enum.any?(frames, &(&1.type == @ping and flag?(&1, @ack))),
+             "expected the peer to acknowledge the PING that arms the idle timer"
 
       assert Enum.any?(frames, &(&1.type == @goaway)),
              "expected the idle connection to be closed with GOAWAY: #{summarize(frames)}"
@@ -230,6 +252,8 @@ defmodule CodexPoolerWeb.EndpointHttp2HalfOpenStreamTest do
     test_pid = self()
     handler_id = {__MODULE__, test_pid, make_ref()}
 
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
     :ok =
       :telemetry.attach(
         handler_id,
@@ -237,10 +261,13 @@ defmodule CodexPoolerWeb.EndpointHttp2HalfOpenStreamTest do
         fn _event, _measurements, metadata, _config ->
           case metadata do
             %{
-              conn: %{request_path: "/stream-then-raise"},
+              conn: %{
+                request_path: "/stream-then-raise",
+                adapter: {Bandit.Adapter, %{transport: %Bandit.HTTP2.Stream{connection_pid: connection_pid}}}
+              },
               plug: {RaiseAfterChunkPlug, _opts}
             } ->
-              send(test_pid, {:mid_stream_failure, self()})
+              send(test_pid, {:mid_stream_failure, self(), connection_pid})
 
             _metadata ->
               :ok
@@ -248,8 +275,19 @@ defmodule CodexPoolerWeb.EndpointHttp2HalfOpenStreamTest do
         end,
         nil
       )
+  end
 
-    on_exit(fn -> :telemetry.detach(handler_id) end)
+  defp arm_idle_timeout(socket, connection_pid) do
+    # Change only the owned connection's configured budget. A real incoming PING
+    # invokes Bandit's handler and ThousandIsland's normal continuation, which
+    # arms the actual read timer; no synthetic timeout message is injected.
+    assert {%ThousandIsland.Socket{read_timeout: @idle_timeout_ms, read_timer: nil}, _state} =
+             :sys.replace_state(connection_pid, fn
+               {%ThousandIsland.Socket{read_timeout: :infinity, read_timer: nil} = server_socket, state} ->
+                 {%{server_socket | read_timeout: @idle_timeout_ms}, state}
+             end)
+
+    :ok = :gen_tcp.send(socket, frame(@ping, 0, 0, <<0::64>>))
   end
 
   defp endpoint_http_2_options do
