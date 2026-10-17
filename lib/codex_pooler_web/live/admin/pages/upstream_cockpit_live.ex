@@ -445,7 +445,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLive do
 
   @impl true
   def terminate(_reason, socket) do
-    if socket.assigns.saved_reset_status_timer, do: Process.cancel_timer(socket.assigns.saved_reset_status_timer)
+    if is_reference(socket.assigns[:saved_reset_status_timer]), do: Process.cancel_timer(socket.assigns.saved_reset_status_timer)
     :ok
   end
 
