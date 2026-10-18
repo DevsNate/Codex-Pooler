@@ -70,8 +70,9 @@ defmodule CodexPooler.Alerts.Delivery.PendingRecovery do
             %{response_metadata: Map.put(current.response_metadata, "delivery_recovery", %{"state" => "unresolved", "reason" => reason, "checked_at" => DateTime.to_iso8601(now)}), updated_at: now}
 
           {:revoked, retryable, reason} ->
+            {adapter, code, message} = interruption(current.response_metadata)
             metadata = current.response_metadata |> Map.put("delivery_outcome", "unknown") |> Map.put("delivery_recovery", %{"state" => "recovered", "reason" => reason, "checked_at" => DateTime.to_iso8601(now)})
-            %{status: if(retryable, do: "retryable", else: "failed"), completed_at: now, retryable: retryable, next_retry_at: if(retryable and job.state in ~w(available scheduled retryable), do: job.scheduled_at), failure_code: "alert_webhook_execution_interrupted", failure_message: "webhook execution ended; delivery outcome unknown", response_metadata: metadata, failure_metadata: %{"delivery_adapter" => "webhook", "failure_code" => "alert_webhook_execution_interrupted", "retryable" => retryable}, updated_at: now}
+            %{status: if(retryable, do: "retryable", else: "failed"), completed_at: now, retryable: retryable, next_retry_at: if(retryable and job.state in ~w(available scheduled retryable), do: job.scheduled_at), failure_code: code, failure_message: message, response_metadata: metadata, failure_metadata: %{"delivery_adapter" => adapter, "failure_code" => code, "retryable" => retryable}, updated_at: now}
         end
       end,
       on_terminal: :unchanged,
@@ -80,6 +81,13 @@ defmodule CodexPooler.Alerts.Delivery.PendingRecovery do
   rescue
     _error in [Postgrex.Error, DBConnection.ConnectionError] -> {:error, :storage_unavailable}
   end
+
+  defp interruption(%{"delivery_adapter" => "email"}),
+    do: {"email", "alert_email_execution_interrupted", "email execution ended; delivery outcome unknown"}
+
+  # Existing pending receipts without adapter metadata came from webhook delivery.
+  defp interruption(_metadata),
+    do: {"webhook", "alert_webhook_execution_interrupted", "webhook execution ended; delivery outcome unknown"}
 
   defp disposition(job, attempt) do
     case Execution.decode(attempt.response_metadata) do

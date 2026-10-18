@@ -186,7 +186,20 @@ defmodule CodexPooler.Alerts.PendingDeliveryRecoveryTest do
     assert Repo.aggregate(Oban.Job, :count) == before_jobs
   end
 
-  defp fixture! do
+  test "email recovery preserves adapter identity for retryable and terminal executions" do
+    for state <- ["retryable", "cancelled"] do
+      {_incident, _channel, job, pending} = fixture!(%{"delivery_adapter" => "email"})
+      job |> Ecto.Changeset.change(state: state) |> Repo.update!()
+      assert {:ok, recovered} = PendingRecovery.recover_one(pending, DateTime.utc_now())
+      assert recovered.status == if(state == "retryable", do: "retryable", else: "failed")
+      assert recovered.failure_code == "alert_email_execution_interrupted"
+      assert recovered.failure_message == "email execution ended; delivery outcome unknown"
+      assert recovered.failure_metadata["delivery_adapter"] == "email"
+      assert recovered.response_metadata["delivery_outcome"] == "unknown"
+    end
+  end
+
+  defp fixture!(metadata \\ %{}) do
     pool = pool_fixture()
     incident = alert_incident_fixture(pool: pool)
     channel = alert_channel_fixture()
@@ -196,7 +209,7 @@ defmodule CodexPooler.Alerts.PendingDeliveryRecoveryTest do
     {:ok, meta} = Basic.init(conf, queue: queue, limit: 1)
     {:ok, {_meta, [claimed]}} = Basic.fetch_jobs(conf, meta, %{})
     assert claimed.id == job.id
-    assert {:ok, pending} = AttemptLifecycle.insert_pending_attempt(incident, channel, 1, DateTime.utc_now(), %{}, Execution.new(claimed))
+    assert {:ok, pending} = AttemptLifecycle.insert_pending_attempt(incident, channel, 1, DateTime.utc_now(), metadata, Execution.new(claimed))
     {incident, channel, claimed, pending}
   end
 end

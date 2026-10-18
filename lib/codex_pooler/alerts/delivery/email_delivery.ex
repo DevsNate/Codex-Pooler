@@ -9,7 +9,7 @@ defmodule CodexPooler.Alerts.Delivery.EmailDelivery do
     AlertIncident
   }
 
-  alias CodexPooler.Alerts.Delivery.AttemptLifecycle
+  alias CodexPooler.Alerts.Delivery.{AttemptLifecycle, Execution}
   alias CodexPooler.Alerts.StatusVocabulary.AssignmentState
   alias CodexPooler.Mailer
   alias CodexPooler.Mailer.Config, as: MailerConfig
@@ -104,61 +104,57 @@ defmodule CodexPooler.Alerts.Delivery.EmailDelivery do
 
   def deliver_incident_to_channel(incident_id, channel_id, attempt_number, opts)
       when is_binary(incident_id) and is_binary(channel_id) and is_integer(attempt_number) do
+    execution = Keyword.get_lazy(opts, :delivery_execution, &Execution.new/0)
+
+    case Execution.storage(execution, fn -> prepare_delivery(incident_id, channel_id, attempt_number, opts, execution) end) do
+      {:ok, attempt, incident, channel} ->
+        result = Execution.run(execution, fn -> deliver_email(incident, channel, execution) end)
+
+        Execution.storage(execution, fn ->
+          record_delivery_result(result, attempt, incident, channel, {timestamp(opts), Keyword.get(opts, :retry_attempt, attempt_number)})
+        end)
+
+      result ->
+        result
+    end
+  end
+
+  def deliver_incident_to_channel(_incident_id, _channel_id, _attempt_number, _opts),
+    do: {:error, :invalid_alert_delivery_args}
+
+  defp prepare_delivery(incident_id, channel_id, attempt_number, opts, execution) do
     timestamp = timestamp(opts)
 
     with {:ok, incident} <- fetch_incident(incident_id),
          {:ok, channel} <- fetch_channel(channel_id),
          :ok <- validate_email_channel(channel),
-         :ok <-
-           AttemptLifecycle.ensure_not_suppressed(incident, channel, timestamp, @delivery_adapter),
-         :ok <- ensure_mailer_configured() do
-      incident
-      |> alert_email(channel)
-      |> Mailer.deliver()
-      |> record_delivery_result(
-        incident,
-        channel,
-        attempt_number,
-        {timestamp, Keyword.get(opts, :retry_attempt, attempt_number)}
-      )
+         :ok <- AttemptLifecycle.ensure_not_suppressed(incident, channel, timestamp, @delivery_adapter),
+         :ok <- ensure_mailer_configured(),
+         {:ok, attempt} <- AttemptLifecycle.insert_pending_attempt(incident, channel, attempt_number, timestamp, base_metadata(incident, channel), execution) do
+      {:ok, attempt, incident, channel}
     else
       {:discard, code, message} ->
-        AttemptLifecycle.record_discarded_attempt(
-          incident_id,
-          channel_id,
-          attempt_number,
-          timestamp,
-          @delivery_adapter,
-          code,
-          message
-        )
+        AttemptLifecycle.record_discarded_attempt(incident_id, channel_id, attempt_number, timestamp, @delivery_adapter, code, message)
 
       {:failure, code, message} ->
-        AttemptLifecycle.record_failed_attempt(
-          incident_id,
-          channel_id,
-          attempt_number,
-          timestamp,
-          @delivery_adapter,
-          code,
-          message
-        )
+        AttemptLifecycle.record_failed_attempt(incident_id, channel_id, attempt_number, timestamp, @delivery_adapter, code, message)
+
+      {:error, _} = error ->
+        error
     end
   rescue
     error ->
-      AttemptLifecycle.record_failed_attempt(
-        incident_id,
-        channel_id,
-        attempt_number,
-        timestamp(opts),
-        @delivery_adapter,
-        "alert_email_delivery_exception",
-        exception_message(error)
-      )
+      AttemptLifecycle.record_failed_attempt(incident_id, channel_id, attempt_number, timestamp(opts), @delivery_adapter, "alert_email_delivery_exception", exception_message(error))
   end
 
-  def deliver_incident_to_channel(_incident_id, _channel_id, _attempt_number, _opts),
-    do: {:error, :invalid_alert_delivery_args}
+  defp deliver_email(incident, channel, execution) do
+    # gen_smtp's timeout bounds connect only; Execution owns the whole SMTP exchange.
+    incident
+    |> alert_email(channel)
+    |> Mailer.deliver(timeout: max(Execution.remaining(execution), 1))
+  rescue
+    error -> {:delivery_exception, exception_message(error)}
+  end
 
   @spec alert_email(AlertIncident.t(), AlertChannel.t()) :: Swoosh.Email.t()
   def alert_email(%AlertIncident{} = incident, %AlertChannel{channel_type: "email"} = channel) do
@@ -209,43 +205,30 @@ defmodule CodexPooler.Alerts.Delivery.EmailDelivery do
       else: {:failure, "alert_email_mailer_unconfigured", "email delivery is not configured"}
   end
 
-  defp record_delivery_result(
-         {:ok, _receipt},
-         incident,
-         channel,
-         attempt_number,
-         {timestamp, _retry_attempt}
-       ) do
-    AttemptLifecycle.insert_sent_attempt(
-      incident,
-      channel,
-      attempt_number,
-      timestamp,
-      success_metadata(incident, channel)
+  defp record_delivery_result({:ok, _receipt}, attempt, incident, channel, {timestamp, _retry_attempt}) do
+    AttemptLifecycle.mark_sent_attempt(attempt, timestamp, success_metadata(incident, channel))
+  end
+
+  defp record_delivery_result({:error, :delivery_timeout}, attempt, incident, channel, {timestamp, retry_attempt}) do
+    retryable = retry_attempt < AlertDeliveryAttempt.fixed_max_attempts()
+
+    AttemptLifecycle.finalize_failed_attempt(attempt, timestamp, @delivery_adapter, "alert_email_delivery_timeout", "email delivery deadline exceeded; delivery outcome unknown",
+      retryable: retryable,
+      next_retry_at: next_retry_at(timestamp, retry_attempt, retryable),
+      response_metadata: Map.put(base_metadata(incident, channel), "delivery_outcome", "unknown")
     )
   end
 
-  defp record_delivery_result(
-         {:error, reason},
-         incident,
-         channel,
-         attempt_number,
-         {timestamp, retry_attempt}
-       ) do
+  defp record_delivery_result({:delivery_exception, message}, attempt, _incident, _channel, {timestamp, _retry_attempt}) do
+    AttemptLifecycle.finalize_failed_attempt(attempt, timestamp, @delivery_adapter, "alert_email_delivery_exception", message)
+  end
+
+  defp record_delivery_result({:error, reason}, attempt, incident, channel, {timestamp, retry_attempt}) do
     sanitized = MailerConfig.sanitize_delivery_error(reason)
     code = sanitized.code |> Atom.to_string()
+    retryable = retryable_failure_code?(code) and retry_attempt < AlertDeliveryAttempt.fixed_max_attempts()
 
-    retryable =
-      retryable_failure_code?(code) and retry_attempt < AlertDeliveryAttempt.fixed_max_attempts()
-
-    AttemptLifecycle.record_failed_attempt(
-      incident.id,
-      channel.id,
-      attempt_number,
-      timestamp,
-      @delivery_adapter,
-      code,
-      sanitized.message,
+    AttemptLifecycle.finalize_failed_attempt(attempt, timestamp, @delivery_adapter, code, sanitized.message,
       next_retry_at: next_retry_at(timestamp, retry_attempt, retryable),
       retryable: retryable,
       response_metadata: base_metadata(incident, channel)

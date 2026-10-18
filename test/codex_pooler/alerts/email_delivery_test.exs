@@ -21,6 +21,16 @@ defmodule CodexPooler.Alerts.Delivery.EmailDeliveryTest do
     end
   end
 
+  defmodule ExceptionAdapter do
+    @behaviour Swoosh.Adapter
+
+    @impl true
+    def validate_config(_config), do: :ok
+
+    @impl true
+    def deliver(_email, _config), do: raise(ArgumentError, "synthetic sensitive adapter detail")
+  end
+
   setup do
     mailer_config = Application.get_env(:codex_pooler, Mailer)
     Application.put_env(:codex_pooler, Mailer, adapter: TLSFailureAdapter)
@@ -123,6 +133,19 @@ defmodule CodexPooler.Alerts.Delivery.EmailDeliveryTest do
     assert attempt.status == "sent"
     assert attempt.attempt_number == 6
     assert Repo.get!(AlertDeliveryAttempt, attempt.id).status == "sent"
+  end
+
+  test "adapter exceptions finalize the pending row without persisting exception details" do
+    Application.put_env(:codex_pooler, Mailer, adapter: ExceptionAdapter)
+    pool = pool_fixture()
+    channel = alert_channel_fixture()
+    incident = alert_incident_fixture(pool: pool)
+
+    assert {:ok, attempt} = EmailDelivery.deliver_incident_to_channel(incident.id, channel.id, 1)
+    assert attempt.status == "failed"
+    assert attempt.failure_code == "alert_email_delivery_exception"
+    assert attempt.failure_message == "ArgumentError raised during alert email delivery"
+    assert Repo.aggregate(from(a in AlertDeliveryAttempt, where: a.incident_id == ^incident.id), :count) == 1
   end
 
   defp restore_env(app, key, nil), do: Application.delete_env(app, key)

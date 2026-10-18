@@ -33,7 +33,7 @@ defmodule CodexPooler.Jobs.AlertDeliveryChangesetTest do
       repo_name = String.to_atom("receipt_repo_#{suffix}")
       fixture = fixture!(suffix, queue)
       tasks = start_supervised!(Task.Supervisor)
-      {port, smtp} = smtp_receiver!(tasks)
+      {port, listener, smtp} = smtp_receiver!(tasks, @collision)
       smtp_monitor = Process.monitor(smtp.pid)
       Application.put_env(:codex_pooler, Mailer, adapter: Swoosh.Adapters.SMTP, use_instance_settings?: false, relay: "127.0.0.1", port: port, ssl: false, tls: :never, auth: :never, retries: 0, no_mx_lookups: true)
 
@@ -44,6 +44,7 @@ defmodule CodexPooler.Jobs.AlertDeliveryChangesetTest do
       on_exit(fn -> :telemetry.detach(telemetry_id) end)
       :ok = :telemetry.attach(telemetry_id, [:oban, :job, :stop], &__MODULE__.observe_stop/4, %{parent: self(), job_id: fixture.job.id, name: oban_name})
       parent = self()
+      writer = if @collision, do: competing_receipt!(tasks, fixture, parent)
 
       execution =
         Task.Supervisor.async_nolink(tasks, fn ->
@@ -58,33 +59,44 @@ defmodule CodexPooler.Jobs.AlertDeliveryChangesetTest do
 
       execution_monitor = Process.monitor(execution.pid)
       assert_receive {:executor_backend, executor_backend}, @budget
-      assert_receive {:smtp_data_ready, handler, release}, @budget
 
-      # SMTP has received DATA but cannot acknowledge it until an independent
-      # PostgreSQL connection commits the conflicting attempt number.
-      writer_backend =
-        database(fn ->
-          %{rows: [[backend]]} = Repo.query!("SELECT pg_backend_pid()")
-          assert Repo.get!(Oban.Job, fixture.job.id).state == "executing"
-          assert Repo.aggregate(from(a in AlertDeliveryAttempt, where: a.incident_id == ^fixture.incident.id), :count) == 0
+      if @collision do
+        {writer_task, writer_backend} = writer
+        refute writer_backend == executor_backend
+        await_blocked!(executor_backend, writer_backend, System.monotonic_time(:millisecond) + 5_000)
+        send(writer_task.pid, :commit)
+        assert {:ok, :ok} = Task.await(writer_task, @budget)
+      else
+        assert_receive {:smtp_data_ready, handler, release}, @budget
 
-          if @collision do
-            assert {:ok, _} = AttemptLifecycle.record_failed_attempt(fixture.incident.id, fixture.channel.id, 1, DateTime.utc_now(), "email", "synthetic_competing_receipt", "competing receipt")
-          end
+        writer_backend =
+          database(fn ->
+            %{rows: [[backend]]} = Repo.query!("SELECT pg_backend_pid()")
+            assert Repo.get!(Oban.Job, fixture.job.id).state == "executing"
+            assert [%{status: "pending"}] = Repo.all(from a in AlertDeliveryAttempt, where: a.incident_id == ^fixture.incident.id)
+            backend
+          end)
 
-          backend
-        end)
+        refute writer_backend == executor_backend
+        send(handler, {:smtp_accept, release})
+      end
 
-      refute executor_backend == writer_backend
-      send(handler, {:smtp_accept, release})
       result = Task.await(execution, @budget)
       assert_receive {:DOWN, ^execution_monitor, :process, _, :normal}, @budget
-      assert Task.await(smtp, @budget) == :accepted_once
+
+      if @collision do
+        assert {:error, :timeout} = :gen_tcp.accept(listener, 0)
+        send(smtp.pid, :verified_no_send)
+        assert Task.await(smtp, @budget) == :not_sent
+      else
+        assert Task.await(smtp, @budget) == :accepted_once
+        assert_receive :smtp_accepted_once, @budget
+      end
+
       assert_receive {:DOWN, ^smtp_monitor, :process, _, :normal}, @budget
-      assert_receive :smtp_accepted_once, @budget
       job = database(fn -> Repo.get!(Oban.Job, fixture.job.id) end)
       expected = if @collision, do: "cancelled", else: "completed"
-      TestDiagnostics.puts("receipt-collision collision=#{@collision} separate_backends=true smtp_accepted=1 job=#{job.state} attempt=#{job.attempt} drain_failure=#{result.failure}")
+      TestDiagnostics.puts("receipt-collision collision=#{@collision} separate_backends=true smtp_accepted=#{if @collision, do: 0, else: 1} job=#{job.state} attempt=#{job.attempt} drain_failure=#{result.failure}")
       assert job.state == expected
       assert job.attempt == 1
       assert result.failure == 0
@@ -153,7 +165,42 @@ defmodule CodexPooler.Jobs.AlertDeliveryChangesetTest do
     end)
   end
 
-  defp smtp_receiver!(tasks) do
+  defp competing_receipt!(tasks, fixture, parent) do
+    task = Task.Supervisor.async_nolink(tasks, fn -> database(fn -> hold_competing_receipt(fixture, parent) end) end)
+    assert_receive {:competing_receipt, backend}, @budget
+    {task, backend}
+  end
+
+  defp hold_competing_receipt(fixture, parent) do
+    Repo.transaction(fn ->
+      assert {:ok, _} = AttemptLifecycle.record_failed_attempt(fixture.incident.id, fixture.channel.id, 1, DateTime.utc_now(), "email", "synthetic_competing_receipt", "competing receipt")
+      %{rows: [[backend]]} = Repo.query!("SELECT pg_backend_pid()")
+      send(parent, {:competing_receipt, backend})
+
+      receive do
+        :commit -> :ok
+      after
+        @budget -> raise "receipt barrier not released"
+      end
+    end)
+  end
+
+  defp await_blocked!(executor, writer, deadline) do
+    blocked = database(fn -> Repo.query!("SELECT $1::integer = ANY(pg_blocking_pids($2::integer))", [writer, executor]).rows == [[true]] end)
+
+    unless blocked do
+      assert System.monotonic_time(:millisecond) < deadline, "pending insert never reached the competing receipt constraint"
+
+      receive do
+      after
+        10 -> :ok
+      end
+
+      await_blocked!(executor, writer, deadline)
+    end
+  end
+
+  defp smtp_receiver!(tasks, collision?) do
     {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, packet: :line, ip: {127, 0, 0, 1}])
     on_exit(fn -> :gen_tcp.close(listener) end)
     {:ok, port} = :inet.port(listener)
@@ -161,18 +208,26 @@ defmodule CodexPooler.Jobs.AlertDeliveryChangesetTest do
 
     task =
       Task.Supervisor.async_nolink(tasks, fn ->
-        {:ok, socket} = :gen_tcp.accept(listener, @budget)
-        :gen_tcp.close(listener)
+        if collision? do
+          receive do
+            :verified_no_send -> :not_sent
+          after
+            @budget -> raise "SMTP absence was not checked"
+          end
+        else
+          {:ok, socket} = :gen_tcp.accept(listener, @budget)
+          :gen_tcp.close(listener)
 
-        try do
-          :ok = :gen_tcp.send(socket, "220 example.com ESMTP\r\n")
-          smtp_commands(socket, parent)
-        after
-          :gen_tcp.close(socket)
+          try do
+            :ok = :gen_tcp.send(socket, "220 example.com ESMTP\r\n")
+            smtp_commands(socket, parent)
+          after
+            :gen_tcp.close(socket)
+          end
         end
       end)
 
-    {port, task}
+    {port, listener, task}
   end
 
   defp smtp_commands(socket, parent) do
