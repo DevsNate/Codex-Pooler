@@ -553,6 +553,8 @@ defmodule CodexPoolerWeb.Admin.OperatorsLiveTest do
       opener = if operation == "reset", do: "reset_operator_password", else: "reactivate_operator"
       render_click(view, opener, %{"id" => target.id})
       view |> element("#operator-reset-password-form") |> render_submit(%{"operator_reset" => %{"password_mode" => "manual", "password" => "short", "send_email" => "false"}})
+      assert has_element?(view, "#flash-error", "password should be at least 8 character(s)")
+      refute has_element?(view, "#flash-error", "%{count}")
       assert has_element?(view, "#operator-reset-password-form input[name='operator_reset[id]'][value='#{target.id}']")
       assert has_element?(view, "#operator-reset-password-form input[name='operator_reset[operation]'][value='#{operation}']")
       password = Accounts.generate_temporary_password()

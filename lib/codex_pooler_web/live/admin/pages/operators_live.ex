@@ -604,7 +604,7 @@ defmodule CodexPoolerWeb.Admin.OperatorsLive do
 
   defp error_message(%Ecto.Changeset{} = changeset) do
     changeset
-    |> Ecto.Changeset.traverse_errors(fn {message, _opts} -> message end)
+    |> Ecto.Changeset.traverse_errors(&translate_error/1)
     |> Enum.flat_map(fn {field, messages} -> Enum.map(messages, &"#{field} #{&1}") end)
     |> List.first()
     |> case do
