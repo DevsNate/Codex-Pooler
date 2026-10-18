@@ -161,6 +161,33 @@ defmodule CodexPooler.Alerts.WebhookDestinationPolicyTest do
     assert Task.await(proxy, 5_000) == :closed
   end
 
+  test "relay accepts queued source bytes after the destination socket reports EOF" do
+    {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, ip: {127, 0, 0, 1}])
+    on_exit(fn -> :gen_tcp.close(listener) end)
+    {:ok, port} = :inet.port(listener)
+
+    [{source_peer, source}, {destination_peer, destination}] =
+      for _ <- 1..2 do
+        {:ok, peer} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false])
+        on_exit(fn -> :gen_tcp.close(peer) end)
+        {:ok, socket} = :gen_tcp.accept(listener)
+        on_exit(fn -> :gen_tcp.close(socket) end)
+        :ok = :inet.setopts(socket, active: true)
+        {peer, socket}
+      end
+
+    :ok = :gen_tcp.send(source_peer, "synthetic terminal bytes")
+    assert_receive {:tcp, ^source, data}, 2_000
+    monitor = :erlang.monitor(:port, destination)
+    :ok = :gen_tcp.close(destination_peer)
+    assert_receive {:DOWN, ^monitor, :port, ^destination, _reason}, 2_000
+
+    # Keep the real destination EOF queued while forwarding earlier source data.
+    assert :ok = relay_data(source, destination, data)
+    refute_receive {:tcp_closed, ^destination}, 0
+    assert {:ok, _address} = :inet.peername(source)
+  end
+
   test "original-host no_proxy bypasses the proxy and unresolved proxy-only DNS never reaches CONNECT", context do
     {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, ip: {127, 0, 0, 1}])
     on_exit(fn -> :gen_tcp.close(listener) end)
@@ -261,20 +288,34 @@ defmodule CodexPooler.Alerts.WebhookDestinationPolicyTest do
   defp relay(client, target) do
     receive do
       {:tcp, ^client, data} ->
-        :ok = :gen_tcp.send(target, data)
-        relay(client, target)
+        relay_data(client, target, data)
 
       {:tcp, ^target, data} ->
-        :ok = :gen_tcp.send(client, data)
-        relay(client, target)
+        relay_data(target, client, data)
 
-      {:tcp_closed, _} ->
+      {:tcp_closed, socket} when socket in [client, target] ->
         :ok
 
       {:tcp_error, _, reason} ->
         flunk("proxy relay failed: #{inspect(reason)}")
     after
       5_000 -> flunk("proxy relay did not close")
+    end
+  end
+
+  defp relay_data(source, destination, data) do
+    case :gen_tcp.send(destination, data) do
+      :ok ->
+        relay(source, destination)
+
+      {:error, reason} when reason in [:closed, :einval] ->
+        # Either peer can close while bytes from the other are already queued.
+        # A send error alone is not EOF: require this destination's real closure.
+        assert_receive {:tcp_closed, ^destination}, 5_000
+        :ok
+
+      {:error, reason} ->
+        flunk("proxy relay send failed: #{inspect(reason)}")
     end
   end
 
