@@ -6,6 +6,9 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.ChatCompletions do
   alias CodexPooler.Gateway.Runtime.Streaming.BufferTelemetry
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
 
+  @prompt_token_detail_fields ~w(audio_tokens cache_write_tokens cached_tokens image_tokens text_tokens)
+  @completion_token_detail_fields ~w(accepted_prediction_tokens audio_tokens reasoning_tokens rejected_prediction_tokens text_tokens)
+
   @spec normalize_response(map(), map()) :: map()
   def normalize_response(decoded, chat_payload) when is_map(decoded) do
     message = %{"role" => "assistant", "content" => output_text(decoded)}
@@ -728,8 +731,9 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.ChatCompletions do
 
         %{
           "prompt_tokens" => prompt_tokens,
-          "prompt_tokens_details" => Map.get(usage, "prompt_tokens_details"),
+          "prompt_tokens_details" => token_details(usage["prompt_tokens_details"], usage["input_tokens_details"], @prompt_token_detail_fields),
           "completion_tokens" => completion_tokens,
+          "completion_tokens_details" => token_details(usage["completion_tokens_details"], usage["output_tokens_details"], @completion_token_detail_fields),
           "total_tokens" => Map.get(usage, "total_tokens") || total_tokens(prompt_tokens, completion_tokens)
         }
         |> Enum.reject(fn {_key, value} -> is_nil(value) end)
@@ -740,6 +744,15 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.ChatCompletions do
         nil
     end
   end
+
+  defp token_details(%{} = details, _fallback, fields) do
+    details
+    |> Map.take(fields)
+    |> Map.filter(fn {_key, value} -> is_integer(value) and value >= 0 end)
+  end
+
+  defp token_details(_details, %{} = fallback, fields), do: token_details(fallback, nil, fields)
+  defp token_details(_details, _fallback, _fields), do: nil
 
   defp maybe_put_compute_units(projected, usage) do
     case Map.fetch(usage, "compute_units") do

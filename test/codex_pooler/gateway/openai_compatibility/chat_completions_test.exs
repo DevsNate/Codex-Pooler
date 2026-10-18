@@ -3,6 +3,57 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.ChatCompletionsTest do
 
   alias CodexPooler.Gateway.OpenAICompatibility.{Chat, ChatCompletions}
 
+  test "projects documented Responses token details in JSON and included stream usage" do
+    prompt_details = %{"audio_tokens" => 0, "cache_write_tokens" => 1, "cached_tokens" => 4, "image_tokens" => 2, "text_tokens" => 3}
+    completion_details = %{"accepted_prediction_tokens" => 0, "audio_tokens" => 1, "reasoning_tokens" => 2, "rejected_prediction_tokens" => 3, "text_tokens" => 4}
+
+    usage = %{
+      "input_tokens_details" => Map.put(prompt_details, "unknown_tokens", 99),
+      "output_tokens_details" => Map.put(completion_details, "unknown_tokens", 99)
+    }
+
+    for status <- ["completed", "incomplete"] do
+      assert_usage_projection(usage, %{"prompt_tokens_details" => prompt_details, "completion_tokens_details" => completion_details}, status)
+    end
+  end
+
+  test "prefers Chat detail maps including empty maps over Responses details" do
+    for details <- [%{}, %{"cached_tokens" => 0, "reasoning_tokens" => 0, "unknown_tokens" => 99}] do
+      assert_usage_projection(
+        %{
+          "prompt_tokens_details" => details,
+          "completion_tokens_details" => details,
+          "input_tokens_details" => %{"cached_tokens" => 4, "cache_write_tokens" => 1},
+          "output_tokens_details" => %{"reasoning_tokens" => 2}
+        },
+        %{"prompt_tokens_details" => Map.take(details, ["cached_tokens"]), "completion_tokens_details" => Map.take(details, ["reasoning_tokens"])}
+      )
+    end
+  end
+
+  test "omits absent or malformed detail objects and falls back from malformed Chat details" do
+    assert_usage_projection(%{}, %{})
+
+    for details <- [nil, false, 1, "invalid", []] do
+      assert_usage_projection(%{"input_tokens_details" => details, "output_tokens_details" => details}, %{})
+      assert_usage_projection(%{"prompt_tokens_details" => details, "completion_tokens_details" => details}, %{})
+
+      assert_usage_projection(
+        %{"prompt_tokens_details" => details, "completion_tokens_details" => details, "input_tokens_details" => %{"cached_tokens" => 0}, "output_tokens_details" => %{"reasoning_tokens" => 0}},
+        %{"prompt_tokens_details" => %{"cached_tokens" => 0}, "completion_tokens_details" => %{"reasoning_tokens" => 0}}
+      )
+    end
+  end
+
+  test "omits malformed token detail counters without inventing values" do
+    for value <- [nil, -1, 1.5, "1", true, %{}, []] do
+      assert_usage_projection(
+        %{"input_tokens_details" => %{"cached_tokens" => value, "cache_write_tokens" => 0}, "output_tokens_details" => %{"reasoning_tokens" => value}},
+        %{"prompt_tokens_details" => %{"cache_write_tokens" => 0}, "completion_tokens_details" => %{}}
+      )
+    end
+  end
+
   for value <- [:absent, nil, 0, 7, -1, 1.5, "7", true, false, %{}, []] do
     @compute_units value
     test "projects compute_units #{inspect(value)} in JSON and included stream usage" do
@@ -645,6 +696,19 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.ChatCompletionsTest do
       refute chunk =~ "data: [DONE]"
       refute chunk =~ "finish_reason"
     end
+  end
+
+  defp assert_usage_projection(details, expected_details, status \\ "completed") do
+    usage = Map.merge(%{"input_tokens" => 5, "output_tokens" => 3, "compute_units" => 7}, details)
+    expected = Map.merge(%{"prompt_tokens" => 5, "completion_tokens" => 3, "total_tokens" => 8, "compute_units" => 7}, expected_details)
+    response = %{"status" => status, "usage" => usage}
+    payload = %{"model" => "gpt-example", "stream_options" => %{"include_usage" => true}}
+    assert ChatCompletions.normalize_response(response, payload)["usage"] == expected
+    terminal = sse_event("response.#{status}", %{"type" => "response.#{status}", "response" => response}) |> IO.iodata_to_binary()
+    {stream, state} = ChatCompletions.normalize_stream_data(terminal, ChatCompletions.stream_state(payload))
+    assert state.terminal_seen?
+    assert [%{"choices" => [], "usage" => ^expected}] = Enum.filter(normalized_sse_payloads(stream), &Map.has_key?(&1, "usage"))
+    assert String.ends_with?(stream, "data: [DONE]\n\n")
   end
 
   defp sse_event(type, data),
