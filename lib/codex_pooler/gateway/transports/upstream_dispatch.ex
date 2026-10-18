@@ -7,7 +7,7 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
 
   alias CodexPooler.Accounting.{ClientRetry, ModelObservation}
   alias CodexPooler.Gateway.OperationalSettings
-  alias CodexPooler.Gateway.Runtime.Finalization.{ExpiredOwnerGenerationCleanup, ResponseUsage}
+  alias CodexPooler.Gateway.Runtime.Finalization.{ExpiredOwnerGenerationCleanup, ResponseUsage, SettlementRetry}
 
   alias CodexPooler.Gateway.Payloads.{
     CompactionTrigger,
@@ -1907,7 +1907,11 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
   defp mark_visible_output(request, attempt, {status, %{body: body} = result})
        when status in [:ok, :error] and is_binary(body) and body != "" do
     if downstream_output_visible?(status, result, body) do
-      PersistenceSessionContinuity.mark_codex_turn_visible(request, attempt)
+      stage = if status == :ok and Map.get(result, :terminal) in ["response.completed", "response.done"], do: :completed_response_visibility, else: :received_response_visibility
+      # Retain the original provider outcome and usage while retrying this
+      # post-reply generation fence. Exhaustion keeps exception finalization;
+      # a collected response must never escape without its visibility check.
+      SettlementRetry.run(stage, request, attempt, fn -> PersistenceSessionContinuity.mark_codex_turn_visible(request, attempt) end, subject: "visible output mark", exhaustion: :raise)
     end
   end
 
