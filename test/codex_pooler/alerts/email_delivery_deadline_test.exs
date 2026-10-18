@@ -26,8 +26,7 @@ defmodule CodexPooler.Alerts.EmailDeliveryDeadlineTest do
     test "real SMTP #{@stage} stall leaves a durable pending receipt then a bounded unknown outcome" do
       fixture = fixture!()
       smtp = smtp!(@stage)
-      execution = %{Execution.new(fixture.job) | deadline: System.monotonic_time(:millisecond) + 600}
-      caller = delivery_task(fixture, execution)
+      {caller, execution} = delivery_task(fixture, 600)
       assert_receive {:smtp_stalled, peer}, @wait
       pending = database(fixture, fn -> attempt!(fixture) end)
       assert pending.status == "pending"
@@ -137,8 +136,7 @@ defmodule CodexPooler.Alerts.EmailDeliveryDeadlineTest do
   test "an exhausted job retry budget records a terminal unknown receipt" do
     fixture = fixture!()
     smtp = smtp!(:data)
-    execution = %{Execution.new(fixture.job) | deadline: System.monotonic_time(:millisecond) + 600}
-    caller = delivery_task(fixture, execution, retry_attempt: 5)
+    {caller, _execution} = delivery_task(fixture, 600, retry_attempt: 5)
     assert_receive {:smtp_stalled, _}, @wait
     assert {:ok, %{status: "failed", retryable: false, next_retry_at: nil} = attempt} = Task.await(caller, @wait)
     assert attempt.response_metadata["delivery_outcome"] == "unknown"
@@ -148,8 +146,7 @@ defmodule CodexPooler.Alerts.EmailDeliveryDeadlineTest do
   test "unknown SMTP outcomes retain at-least-once retry and a successor can complete" do
     fixture = fixture!()
     first_smtp = smtp!(:data)
-    execution = %{Execution.new(fixture.job) | deadline: System.monotonic_time(:millisecond) + 600}
-    first = delivery_task(fixture, execution)
+    {first, _execution} = delivery_task(fixture, 600)
     assert_receive {:smtp_stalled, _}, @wait
     assert {:error, %{retryable: true}} = Task.await(first, @wait)
     assert Task.await(first_smtp.task, @wait) == {:error, :closed}
@@ -183,9 +180,44 @@ defmodule CodexPooler.Alerts.EmailDeliveryDeadlineTest do
     TestDiagnostics.puts("email-retry unknown_then_success=true smtp_data_accepted_twice=true at_least_once=true job_attempt=2")
   end
 
-  defp delivery_task(fixture, execution, opts \\ []) do
+  defp delivery_task(fixture, execution_or_budget, opts \\ [])
+
+  defp delivery_task(fixture, budget, opts) when is_integer(budget) do
+    setup_started = System.monotonic_time(:millisecond)
+    tasks = start_supervised!(Supervisor.child_spec({Task.Supervisor, []}, id: make_ref()))
+    parent = self()
+    caller = Task.Supervisor.async_nolink(tasks, fn -> prepared_delivery(fixture, budget, opts, parent) end)
+    pid = caller.pid
+    assert_receive {:delivery_started, ^pid, execution, ready_at, started_at}, @wait
+    assert started_at >= ready_at
+    assert execution.deadline == started_at + budget
+    TestDiagnostics.puts("email-deadline-readiness setup_ms=#{started_at - setup_started} sql_ready_before_deadline=true budget_ms=#{budget}")
+    {caller, execution}
+  end
+
+  defp delivery_task(fixture, %Execution{} = execution, opts) do
     tasks = start_supervised!(Supervisor.child_spec({Task.Supervisor, []}, id: make_ref()))
     Task.Supervisor.async_nolink(tasks, fn -> database(fixture, fn -> EmailDelivery.deliver_incident_to_channel(fixture.incident.id, fixture.channel.id, 1, Keyword.put(opts, :delivery_execution, execution)) end) end)
+  end
+
+  defp prepared_delivery(fixture, budget, opts, parent) do
+    database(fixture, fn ->
+      Repo.checkout(fn -> deliver_on_ready_connection(fixture, budget, opts, parent) end)
+    end)
+  end
+
+  defp deliver_on_ready_connection(fixture, budget, opts, parent) do
+    # Pin a live private-Repo connection before the behavior budget starts.
+    # The public delivery's reads, pending transaction and SMTP still share
+    # the same absolute deadline; no adapter-side timer replaces Execution.run.
+    %{rows: [[backend]]} = Repo.query!("SELECT pg_backend_pid()")
+    ready_at = System.monotonic_time(:millisecond)
+    started_at = System.monotonic_time(:millisecond)
+    execution = %{Execution.new(fixture.job) | deadline: started_at + budget}
+    send(parent, {:delivery_started, self(), execution, ready_at, started_at})
+    result = EmailDelivery.deliver_incident_to_channel(fixture.incident.id, fixture.channel.id, 1, Keyword.put(opts, :delivery_execution, execution))
+    assert %{rows: [[^backend]]} = Repo.query!("SELECT pg_backend_pid()")
+    result
   end
 
   defp fixture! do
