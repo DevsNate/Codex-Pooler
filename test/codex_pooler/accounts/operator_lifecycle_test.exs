@@ -43,6 +43,28 @@ defmodule CodexPooler.Accounts.OperatorLifecycleTest do
     assert unchanged?
   end
 
+  for operation <- [:reset_operator_password, :resend_operator_temporary_password, :reactivate_operator],
+      actor_kind <- [:user, :scope] do
+    @tag :self_password_guard
+    test "#{operation} rejects self-targeting through a #{actor_kind} without side effects" do
+      %{user: owner} = bootstrap_owner_fixture()
+      actor = if unquote(actor_kind) == :scope, do: Scope.for_user(owner), else: owner
+      before_rows = {Repo.all(User), Repo.all(Session), Repo.all(AuditEvent)}
+      password = Accounts.generate_temporary_password()
+
+      for target <- [owner, owner.id, String.upcase(owner.id)] do
+        result = apply(Accounts, unquote(operation), [actor, target, %{"password" => password, "password_change_required" => "false", "send_email" => "true"}, %{}])
+        denied? = result == {:error, :self_operator_password_change}
+        assert denied?
+        unchanged? = before_rows == {Repo.all(User), Repo.all(Session), Repo.all(AuditEvent)}
+        assert unchanged?
+      end
+
+      refute Accounts.get_user_by_email_and_password(owner.email, password)
+      Swoosh.TestAssertions.assert_no_email_sent()
+    end
+  end
+
   describe "operator lifecycle contract" do
     @tag :operator_lifecycle
     test "exports the expected public operator lifecycle APIs" do

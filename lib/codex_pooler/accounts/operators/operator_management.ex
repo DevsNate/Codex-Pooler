@@ -130,7 +130,8 @@ defmodule CodexPooler.Accounts.OperatorManagement do
 
     result =
       with {:ok, actor} <- require_operator_management(actor),
-           {:ok, operator} <- get_operator_target(operator) do
+           {:ok, operator} <- get_operator_target(operator),
+           :ok <- reject_self_password_change(actor, operator) do
         reactivate_operator_target(actor, operator, attrs, metadata, temporary_password)
       end
       |> broadcast_user_session_revocation()
@@ -433,7 +434,8 @@ defmodule CodexPooler.Accounts.OperatorManagement do
       OperatorPasswords.temporary_password_changeset_attrs(attrs, temporary_password)
 
     with {:ok, actor} <- require_operator_management(actor),
-         {:ok, operator} <- get_operator_target(operator) do
+         {:ok, operator} <- get_operator_target(operator),
+         :ok <- reject_self_password_change(actor, operator) do
       operator_for_update_transaction(operator.id, fn operator ->
         update_operator_temporary_password(
           actor,
@@ -447,6 +449,10 @@ defmodule CodexPooler.Accounts.OperatorManagement do
     end
     |> broadcast_user_session_revocation()
   end
+
+  defp reject_self_password_change(%Scope{user: user}, operator), do: reject_self_password_change(user, operator)
+  defp reject_self_password_change(%User{id: id}, %User{id: id}), do: {:error, :self_operator_password_change}
+  defp reject_self_password_change(%User{}, %User{}), do: :ok
 
   defp update_operator_temporary_password(
          actor,

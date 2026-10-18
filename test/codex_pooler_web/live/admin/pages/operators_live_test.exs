@@ -7,7 +7,8 @@ defmodule CodexPoolerWeb.Admin.OperatorsLiveTest do
   import CodexPooler.PoolerFixtures, only: [pool_fixture: 1]
 
   alias CodexPooler.Accounts
-  alias CodexPooler.Accounts.User
+  alias CodexPooler.Accounts.{Session, User}
+  alias CodexPooler.Audit.AuditEvent
   alias CodexPooler.Pools
   alias CodexPooler.Pools.OperatorPoolAssignment
   alias CodexPooler.Repo
@@ -487,6 +488,87 @@ defmodule CodexPoolerWeb.Admin.OperatorsLiveTest do
     assert target_operator.display_name == "Forged Target"
     assert owner.status == "active"
   end
+
+  for operation <- ["reset", "reactivate"] do
+    @tag :self_password_guard
+    test "rejects a forged self #{operation} submit without an open dialog", %{conn: conn, user: owner} do
+      {:ok, view, _html} = live(conn, ~p"/admin/operators")
+      before_rows = operator_password_rows()
+      password = Accounts.generate_temporary_password()
+
+      html = render_submit(view, "save_temporary_password", %{"operator_reset" => %{"id" => owner.id, "operation" => unquote(operation), "password_mode" => "manual", "password" => password, "password_change_required" => "false", "send_email" => "true"}})
+
+      unchanged? = before_rows == operator_password_rows()
+      assert unchanged?
+      assert Process.alive?(view.pid)
+      refute has_element?(view, "#operator-temporary-password-dialog-receipt")
+      refute html =~ password
+      refute Accounts.get_user_by_email_and_password(owner.email, password)
+      assert_no_email_sent()
+    end
+  end
+
+  @tag :self_password_guard
+  test "rejects opening self reactivation", %{conn: conn, user: owner} do
+    {:ok, view, _html} = live(conn, ~p"/admin/operators")
+    assert render_click(view, "reactivate_operator", %{"id" => owner.id}) =~ "Use account settings to change your own password."
+    refute has_element?(view, "#operator-password-dialog[open]")
+  end
+
+  @tag :self_password_guard
+  test "password submit requires the current dialog target and operation", %{conn: conn, scope: scope, user: owner} do
+    %{user: target} = operator_fixture(scope, %{"send_email" => "false"})
+    %{user: other} = operator_fixture(scope, %{"send_email" => "false"})
+    {:ok, view, _html} = live(conn, ~p"/admin/operators")
+    before_rows = operator_password_rows()
+    password = Accounts.generate_temporary_password()
+    params = %{"id" => target.id, "operation" => "reset", "password_mode" => "manual", "password" => password, "password_change_required" => "false", "send_email" => "true"}
+
+    assert render_submit(view, "save_temporary_password", %{"operator_reset" => params}) =~ "Operator was not found"
+    view |> element("#reset-operator-password-#{target.id}") |> render_click()
+
+    for altered <- [Map.put(params, "id", other.id), Map.put(params, "id", owner.id), Map.put(params, "id", "invalid"), Map.delete(params, "id"), Map.put(params, "operation", "reactivate"), Map.put(params, "operation", "invalid"), Map.delete(params, "operation")] do
+      html = render_submit(view, "save_temporary_password", %{"operator_reset" => altered})
+      unchanged? = before_rows == operator_password_rows()
+      assert unchanged?
+      refute html =~ password
+      assert has_element?(view, "#operator-password-dialog[open]")
+    end
+
+    view |> element("#operator-reset-password-cancel") |> render_click()
+    assert render_submit(view, "save_temporary_password", %{"operator_reset" => params}) =~ "Operator was not found"
+    unchanged? = before_rows == operator_password_rows()
+    assert unchanged?
+    assert_no_email_sent()
+  end
+
+  for operation <- ["reset", "reactivate"] do
+    @tag :self_password_guard
+    test "#{operation} keeps the selected operator and manual password through validation", %{conn: conn, scope: scope} do
+      %{user: target, temporary_password: original_password} = operator_fixture(scope, %{"password_change_required" => "false", "send_email" => "false"})
+      {:ok, %{token: token}} = Accounts.login_user(%{"email" => target.email, "password" => original_password})
+      operation = unquote(operation)
+      if operation == "reactivate", do: Accounts.deactivate_operator(scope, target, %{})
+      {:ok, view, _html} = live(conn, ~p"/admin/operators")
+      opener = if operation == "reset", do: "reset_operator_password", else: "reactivate_operator"
+      render_click(view, opener, %{"id" => target.id})
+      view |> element("#operator-reset-password-form") |> render_submit(%{"operator_reset" => %{"password_mode" => "manual", "password" => "short", "send_email" => "false"}})
+      assert has_element?(view, "#operator-reset-password-form input[name='operator_reset[id]'][value='#{target.id}']")
+      assert has_element?(view, "#operator-reset-password-form input[name='operator_reset[operation]'][value='#{operation}']")
+      password = Accounts.generate_temporary_password()
+      view |> element("#operator-reset-password-form") |> render_submit(%{"operator_reset" => %{"password_mode" => "manual", "password" => password, "password_change_required" => "false", "send_email" => "false"}})
+      assert has_element?(view, "#operator-temporary-password-dialog-receipt")
+      assert Accounts.get_user_by_email_and_password(target.email, password)
+      refute Accounts.get_user_by_email_and_password(target.email, original_password)
+      refute Accounts.get_user_by_session_token(token)
+      assert Repo.reload!(target).status == "active"
+      refute Repo.reload!(target).password_change_required
+      assert Process.alive?(view.pid)
+      assert_no_email_sent()
+    end
+  end
+
+  defp operator_password_rows, do: {Repo.all(User), Repo.all(Session), Repo.all(AuditEvent)}
 
   test "edits operator role and selected Pool assignments", %{conn: conn, scope: scope} do
     original_pool = pool_fixture(%{slug: "live-edit-original", name: "Live Edit Original"})

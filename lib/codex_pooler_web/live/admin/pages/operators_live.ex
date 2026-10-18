@@ -188,7 +188,10 @@ defmodule CodexPoolerWeb.Admin.OperatorsLive do
   end
 
   def handle_event("reactivate_operator", %{"id" => operator_id}, socket) do
-    prepare_temporary_password_form(socket, operator_id, :reactivate)
+    case reject_self_operator_action(socket, operator_id) do
+      :ok -> prepare_temporary_password_form(socket, operator_id, :reactivate)
+      {:error, message} -> {:noreply, put_flash(socket, :error, message)}
+    end
   end
 
   def handle_event("reset_operator_password", %{"id" => operator_id}, socket) do
@@ -203,9 +206,27 @@ defmodule CodexPoolerWeb.Admin.OperatorsLive do
   end
 
   def handle_event("save_temporary_password", %{"operator_reset" => operator_params}, socket) do
-    operator_id = operator_params["id"]
-    operation = OperatorForm.reset_operation(operator_params["operation"])
+    with {:ok, _decision} <- Pools.require_capability(socket.assigns.current_scope, Pools.capability(:pool_manage)),
+         {:ok, operator, operation} <- password_dialog_target(socket, operator_params) do
+      save_temporary_password(socket, operator, operation, operator_params)
+    else
+      {:error, :invalid_operator} -> {:noreply, put_flash(socket, :error, error_message(:invalid_operator))}
+      {:error, _reason} -> {:noreply, put_flash(socket, :error, error_message(:operator_management_denied))}
+    end
+  end
 
+  defp password_dialog_target(%{assigns: %{resetting_operator: %User{} = operator, reset_operation: operation}}, params)
+       when operation in [:reset, :reactivate] and is_map(params) do
+    if params["id"] == operator.id and params["operation"] == Atom.to_string(operation) do
+      {:ok, operator, operation}
+    else
+      {:error, :invalid_operator}
+    end
+  end
+
+  defp password_dialog_target(_socket, _params), do: {:error, :invalid_operator}
+
+  defp save_temporary_password(socket, operator, operation, operator_params) do
     operation_fun =
       case operation do
         :reactivate -> &Accounts.reactivate_operator/4
@@ -214,7 +235,7 @@ defmodule CodexPoolerWeb.Admin.OperatorsLive do
 
     case operation_fun.(
            socket.assigns.current_scope,
-           operator_id,
+           operator.id,
            OperatorForm.password_attrs(operator_params),
            operator_metadata()
          ) do
@@ -237,10 +258,7 @@ defmodule CodexPoolerWeb.Admin.OperatorsLive do
          |> reload_operators()}
 
       {:error, %Ecto.Changeset{} = changeset} ->
-        {:noreply,
-         socket
-         |> put_flash(:error, error_message(changeset))
-         |> assign(:reset_form, OperatorForm.reset_form_for_changeset(changeset))}
+        {:noreply, put_flash(socket, :error, error_message(changeset))}
 
       {:error, reason} ->
         {:noreply, put_flash(socket, :error, error_message(reason))}
@@ -577,6 +595,7 @@ defmodule CodexPoolerWeb.Admin.OperatorsLive do
   defp error_message(:invalid_operator_role), do: "Role must be instance owner or instance admin."
   defp error_message(:invalid_pool_assignment), do: "Assigned Pools were not valid."
   defp error_message(:invalid_operator), do: "Operator was not found"
+  defp error_message(:self_operator_password_change), do: "Use account settings to change your own password."
 
   defp error_message(:operator_management_denied),
     do: "Only instance owners can manage operators."
