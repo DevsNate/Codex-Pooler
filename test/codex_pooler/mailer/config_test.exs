@@ -227,6 +227,64 @@ defmodule CodexPooler.Mailer.ConfigTest do
     end
   end
 
+  describe "SMTP session error envelopes" do
+    test "classifies capability and reply errors without exposing relay or response details" do
+      cases = [
+        {{:missing_requirement, "smtp.example.com", :tls}, :smtp_test_email_tls_unavailable, :smtp_probe_tls_unavailable, "SMTP server does not support the requested TLS mode"},
+        {{:missing_requirement, ~c"smtp.example.com", :auth}, :smtp_test_email_auth_unavailable, :smtp_probe_auth_unavailable, "SMTP server does not support the requested authentication flow"},
+        {{:unexpected_response, "smtp.example.com", ["250-untrusted relay detail", "500 mismatched reply"]}, :smtp_test_email_unexpected_response, :smtp_probe_unexpected_response, "SMTP server returned an unexpected response"},
+        {{:unexpected_response, ~c"smtp.example.com", "malformed relay detail"}, :smtp_test_email_unexpected_response, :smtp_probe_unexpected_response, "SMTP server returned an unexpected response"}
+      ]
+
+      for {failure, delivery_code, probe_code, message} <- cases,
+          reason <- smtp_error_envelopes(failure) do
+        assert MailerConfig.sanitize_delivery_error(reason) == %{code: delivery_code, message: message}
+        assert MailerConfig.sanitize_probe_error(reason) == %{code: probe_code, message: message}
+      end
+    end
+
+    test "unknown or malformed envelopes do not promote embedded capability and reply markers" do
+      for reason <- [
+            {:unknown, {:missing_requirement, "smtp.example.com", :tls}},
+            {:error, :unknown, {:missing_requirement, "smtp.example.com", :auth}},
+            {:error, {:unknown, {:unexpected_response, "smtp.example.com", "reply"}}},
+            {:retries_exceeded, {:missing_requirement, "smtp.example.com", :unknown}},
+            {:retries_exceeded, {:unexpected_response, "smtp.example.com", %{detail: "reply"}}},
+            {:retries_exceeded, {:missing_requirement, nil, :tls}},
+            {:retries_exceeded, {:retries_exceeded, {:missing_requirement, "smtp.example.com", :tls}}},
+            [{:missing_requirement, "smtp.example.com", :tls}],
+            nil
+          ] do
+        assert MailerConfig.sanitize_delivery_error(reason) == %{code: :smtp_test_email_failed, message: "SMTP test email failed"}
+        assert MailerConfig.sanitize_probe_error(reason) == %{code: :smtp_probe_failed, message: "SMTP probe failed"}
+      end
+    end
+
+    test "existing failure priorities survive real native and Swoosh envelopes" do
+      cases = [
+        {{:permanent_failure, "smtp.example.com", :auth_failed}, :smtp_test_email_auth_failed, :smtp_probe_auth_failed},
+        {{:temporary_failure, "smtp.example.com", :tls_failed}, :smtp_test_email_tls_failed, :smtp_probe_tls_failed},
+        {{:network_failure, "smtp.example.com", {:error, :timeout}}, :smtp_test_email_timeout, :smtp_probe_timeout},
+        {{:network_failure, "smtp.example.com", {:error, :econnrefused}}, :smtp_test_email_connection_failed, :smtp_probe_connection_failed},
+        {{:temporary_failure, "smtp.example.com", "451 rejected"}, :smtp_test_email_temporary_failure, :smtp_probe_temporary_failure},
+        {{:permanent_failure, "smtp.example.com", "550 rejected"}, :smtp_test_email_rejected, :smtp_probe_rejected}
+      ]
+
+      for {failure, delivery_code, probe_code} <- cases,
+          reason <- smtp_error_envelopes(failure) do
+        assert MailerConfig.sanitize_delivery_error(reason).code == delivery_code
+        assert MailerConfig.sanitize_probe_error(reason).code == probe_code
+      end
+    end
+  end
+
+  defp smtp_error_envelopes(failure) do
+    [failure, {:error, failure}] ++
+      for outer <- [:retries_exceeded, :no_more_hosts],
+          reason <- [{outer, failure}, {:error, {outer, failure}}, {:error, outer, failure}],
+          do: reason
+  end
+
   defp smtp_settings(overrides) do
     Map.merge(%{enabled: true, host: "smtp.example.com", port: 465, username: nil, password: nil, from: "sender@example.com", ssl: false, tls: "always", retries: 0}, overrides)
   end

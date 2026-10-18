@@ -133,6 +133,8 @@ defmodule CodexPooler.Mailer.Config do
   end
 
   def sanitize_delivery_error(reason) do
+    session_failure = smtp_session_failure(reason)
+
     cond do
       auth_failed_reason?(reason) ->
         %{code: :smtp_test_email_auth_failed, message: "SMTP authentication failed"}
@@ -155,10 +157,23 @@ defmodule CodexPooler.Mailer.Config do
       permanent_failure_reason?(reason) ->
         %{code: :smtp_test_email_rejected, message: "SMTP server rejected the test email"}
 
+      session_failure ->
+        sanitize_delivery_error({:error, session_failure})
+
       true ->
         %{code: :smtp_test_email_failed, message: "SMTP test email failed"}
     end
   end
+
+  defp smtp_session_failure({:error, outer, failure}) when outer in [:retries_exceeded, :no_more_hosts], do: smtp_host_failure(failure)
+  defp smtp_session_failure({:error, {outer, failure}}) when outer in [:retries_exceeded, :no_more_hosts], do: smtp_host_failure(failure)
+  defp smtp_session_failure({outer, failure}) when outer in [:retries_exceeded, :no_more_hosts], do: smtp_host_failure(failure)
+  defp smtp_session_failure({:error, failure}), do: smtp_host_failure(failure)
+  defp smtp_session_failure(failure), do: smtp_host_failure(failure)
+
+  defp smtp_host_failure({:missing_requirement, host, requirement}) when (is_binary(host) or is_list(host)) and requirement in [:auth, :tls], do: {:missing_requirement, requirement}
+  defp smtp_host_failure({:unexpected_response, host, responses}) when (is_binary(host) or is_list(host)) and (is_binary(responses) or is_list(responses)), do: {:unexpected_response, nil}
+  defp smtp_host_failure(_failure), do: nil
 
   defp timeout_reason?(:timeout), do: true
 
@@ -289,6 +304,8 @@ defmodule CodexPooler.Mailer.Config do
   end
 
   def sanitize_probe_error(reason) do
+    session_failure = smtp_session_failure(reason)
+
     cond do
       auth_failed_reason?(reason) ->
         %{code: :smtp_probe_auth_failed, message: "SMTP authentication failed"}
@@ -310,6 +327,9 @@ defmodule CodexPooler.Mailer.Config do
 
       permanent_failure_reason?(reason) ->
         %{code: :smtp_probe_rejected, message: "SMTP server rejected the probe"}
+
+      session_failure ->
+        sanitize_probe_error({:error, session_failure})
 
       true ->
         %{code: :smtp_probe_failed, message: "SMTP probe failed"}
