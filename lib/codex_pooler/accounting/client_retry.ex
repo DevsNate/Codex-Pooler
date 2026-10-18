@@ -677,7 +677,7 @@ defmodule CodexPooler.Accounting.ClientRetry do
   @doc false
   @spec admission_linked_session_ids(Request.t(), map()) :: [Ecto.UUID.t()]
   def admission_linked_session_ids(%Request{} = request, scope) do
-    ancestry = discover_admission_ancestry(request, scope, 0)
+    ancestry = discover_admission_ancestry(request, scope)
     original = hd(ancestry)
     # Discovery needs the same session set, not one round trip per ancestor.
     # Admission still locks and revalidates the current rows after discovery.
@@ -686,11 +686,7 @@ defmodule CodexPooler.Accounting.ClientRetry do
     ancestor_sessions ++ discover_linked_sessions(original, original, scope, 0)
   end
 
-  defp discover_admission_ancestry(request, _scope, depth) when depth >= @max_chain_depth, do: [request]
-
-  defp discover_admission_ancestry(request, scope, depth) do
-    remaining_depth = @max_chain_depth - depth
-
+  defp discover_admission_ancestry(request, scope) do
     first =
       from candidate in admission_requests(scope),
         join: link in RequestClientRetryLink,
@@ -704,7 +700,7 @@ defmodule CodexPooler.Accounting.ClientRetry do
         on: link.predecessor_request_id == candidate.id,
         join: ancestry in "admission_ancestry",
         on: ancestry.id == link.successor_request_id,
-        where: ancestry.depth < ^remaining_depth,
+        where: ancestry.depth < ^@max_chain_depth,
         select: %{id: candidate.id, depth: ancestry.depth + 1}
 
     candidates = union_all(first, ^previous)
