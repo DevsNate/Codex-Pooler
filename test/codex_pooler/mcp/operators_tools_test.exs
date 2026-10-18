@@ -30,6 +30,35 @@ defmodule CodexPooler.MCP.OperatorsToolsTest do
     %{auth: auth, owner: owner, raw_token: raw_token}
   end
 
+  test "list and get preserve login timestamps while omitting absent timestamps", %{auth: auth} do
+    timestamp = ~U[2026-10-01 12:00:00.123456Z]
+    %{user: operator} = operator_fixture(auth.operator, %{"display_name" => "Timestamp operator", "email" => unique_user_email()})
+
+    for value <- [nil, timestamp] do
+      operator |> Ecto.Changeset.change(last_login_at: value) |> Repo.update!()
+
+      for {tool, arguments, field} <- [
+            {"codex_pooler_list_operators", %{"query" => "Timestamp operator"}, "operators"},
+            {"codex_pooler_get_operator", %{"selector" => operator.id}, "item"}
+          ] do
+        assert {:ok, result} = ToolDispatch.call(tool, arguments, %{auth: auth})
+        assert result["isError"] == false
+        presented = result["structuredContent"][field]
+        presented = if is_list(presented), do: hd(presented), else: presented
+
+        if value do
+          assert presented["last_login_at"] == "2026-10-01T12:00:00.123456Z"
+        else
+          refute Map.has_key?(presented, "last_login_at")
+        end
+
+        assert presented["mcp_enabled"] == false
+        assert presented["mcp_key_count"] == 0
+        assert :ok = Redaction.assert_mcp_output_safe!(result)
+      end
+    end
+  end
+
   test "lists bounded operator metadata with masked emails and no credential fields", %{
     auth: auth
   } do

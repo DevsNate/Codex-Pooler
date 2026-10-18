@@ -549,6 +549,7 @@ defmodule CodexPooler.MCP.PrivacyMatrix do
   end
 
   defp summarize(:capacity_decision, _value), do: %{}
+  defp summarize(:last_login_at, %DateTime{} = value), do: DateTime.to_iso8601(value)
   defp summarize(_field, value) when is_map(value), do: Map.take(value, safe_summary_keys(value))
   defp summarize(_field, value), do: value
 

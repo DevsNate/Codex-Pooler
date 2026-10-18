@@ -79,6 +79,23 @@ defmodule CodexPooler.MCP.PrivacyMatrixTest do
     :source_precision
   ]
 
+  test "operator login timestamps preserve ISO-8601 precision without widening summary values" do
+    timestamp = ~U[2026-10-01 12:00:00.123456Z]
+    expected = "2026-10-01T12:00:00.123456Z"
+
+    for value <- [timestamp, expected] do
+      assert PrivacyMatrix.project!(:operators, %{last_login_at: value, mcp_enabled: false, mcp_key_count: 0}) == %{
+               last_login_at: expected,
+               mcp_enabled: false,
+               mcp_key_count: 0
+             }
+    end
+
+    assert PrivacyMatrix.project!(:operators, %{last_login_at: nil}) == %{}
+    assert PrivacyMatrix.project!(:operators, %{last_login_at: %{count: 1, secret: "omitted"}}) == %{last_login_at: %{count: 1}}
+    assert PrivacyMatrix.project!(:operators, %{last_login_at: ~D[2026-10-01]}) == %{last_login_at: %{}}
+  end
+
   test "matrix enumerates every initial MCP entity family" do
     assert PrivacyMatrix.entity_families() == @entity_families
   end
