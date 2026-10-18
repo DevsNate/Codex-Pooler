@@ -153,8 +153,16 @@ defmodule CodexPooler.Mailer.SmtpTlsContractTest do
   defp reply_to_quit(transport, socket) do
     # gen_smtp closes immediately after QUIT without waiting for the reply.
     case transport.send(socket, "221 bye\r\n") do
-      :ok -> :ok
-      {:error, :closed} -> :ok
+      :ok ->
+        :ok
+
+      {:error, :closed} ->
+        :ok
+
+      {:error, :einval} ->
+        # OTP can forward the transport's error while the TLS sender is closing.
+        assert {:error, :closed} = transport.recv(socket, 0, 10_000)
+        :ok
     end
   end
 
