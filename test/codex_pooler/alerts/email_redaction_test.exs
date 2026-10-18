@@ -16,7 +16,7 @@ defmodule CodexPooler.Alerts.EmailRedactionTest do
     AlertRuleChannel
   }
 
-  alias CodexPooler.Jobs.AlertDeliveryWorker
+  alias CodexPooler.Jobs
   alias CodexPooler.Mailer
   alias CodexPooler.Repo
 
@@ -84,11 +84,7 @@ defmodule CodexPooler.Alerts.EmailRedactionTest do
     assert email.text_body =~ "- route_class_scope: proxy_stream"
     refute email.text_body =~ "safe_to_ignore"
 
-    assert :ok =
-             perform_job(AlertDeliveryWorker, %{
-               "alert_incident_id" => incident.id,
-               "alert_channel_id" => channel.id
-             })
+    job = deliver_queued!(incident, channel)
 
     assert_email_sent(fn sent_email ->
       refute_forbidden_values(sent_email.text_body)
@@ -96,6 +92,9 @@ defmodule CodexPooler.Alerts.EmailRedactionTest do
     end)
 
     assert [attempt] = Repo.all(AlertDeliveryAttempt)
+    assert attempt.response_metadata["delivery_execution"]["job_id"] == job.id
+    assert attempt.response_metadata["delivery_execution"]["job_attempt"] == job.attempt
+    CodexPooler.TestDiagnostics.puts("email-redaction completed_job=true matching_execution_binding=true job_attempt=#{job.attempt}")
 
     attempt_metadata =
       CodexPooler.JSON.encode!(%{
@@ -172,13 +171,12 @@ defmodule CodexPooler.Alerts.EmailRedactionTest do
     refute email.text_body =~ "pool_upstream_assignment_id"
     refute email.text_body =~ "upstream_identity_id"
 
-    assert :ok =
-             perform_job(AlertDeliveryWorker, %{
-               "alert_incident_id" => incident.id,
-               "alert_channel_id" => channel.id
-             })
+    job = deliver_queued!(incident, channel)
 
     assert [attempt] = Repo.all(AlertDeliveryAttempt)
+    assert attempt.response_metadata["delivery_execution"]["job_id"] == job.id
+    assert attempt.response_metadata["delivery_execution"]["job_attempt"] == job.attempt
+    CodexPooler.TestDiagnostics.puts("email-redaction completed_job=true matching_execution_binding=true job_attempt=#{job.attempt}")
 
     assert attempt.response_metadata["safe_evidence_summary"] == %{
              "available_count" => 2,
@@ -196,6 +194,13 @@ defmodule CodexPooler.Alerts.EmailRedactionTest do
     attempt_metadata = CodexPooler.JSON.encode!(attempt.response_metadata)
     refute attempt_metadata =~ "provider-credit-hidden"
     refute attempt_metadata =~ "pool_upstream_assignment_id"
+  end
+
+  defp deliver_queued!(incident, channel) do
+    assert {:ok, job} = Jobs.enqueue_alert_delivery(incident, channel)
+    assert %{success: 1, failure: 0, cancelled: 0, discard: 0, snoozed: 0} = Oban.drain_queue(queue: job.queue)
+    assert %{state: "completed", attempt: 1} = completed = Repo.get!(Oban.Job, job.id)
+    completed
   end
 
   defp unsafe_evidence do

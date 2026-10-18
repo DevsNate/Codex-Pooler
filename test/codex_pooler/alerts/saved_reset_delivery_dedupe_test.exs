@@ -83,8 +83,13 @@ defmodule CodexPooler.Alerts.SavedResetDeliveryDedupeTest do
     assert :ok = enqueue_lifecycle_deliveries(beta_channel_result)
     assert delivery_job_count() == 2
 
-    all_enqueued(worker: AlertDeliveryWorker)
-    |> Enum.each(fn job -> assert :ok = perform_job(AlertDeliveryWorker, job.args) end)
+    delivery_jobs = all_enqueued(worker: AlertDeliveryWorker)
+    assert %{success: 2, failure: 0, cancelled: 0, discard: 0, snoozed: 0} = Oban.drain_queue(queue: :jobs)
+    assert delivery_job_count() == 0
+
+    for job <- delivery_jobs do
+      assert %{state: "completed", attempt: 1} = Repo.get!(Oban.Job, job.id)
+    end
 
     assert [attempt] = delivery_attempts_for(alpha_result.incident, channel)
     assert attempt.status == "sent"
@@ -93,6 +98,12 @@ defmodule CodexPooler.Alerts.SavedResetDeliveryDedupeTest do
     assert [beta_attempt] = delivery_attempts_for(alpha_result.incident, beta_channel)
     assert beta_attempt.status == "sent"
     assert beta_attempt.attempt_number == 1
+
+    for receipt <- [attempt, beta_attempt] do
+      job = Enum.find(delivery_jobs, &(&1.args["alert_channel_id"] == receipt.channel_id))
+      assert receipt.response_metadata["delivery_execution"]["job_id"] == job.id
+      assert receipt.response_metadata["delivery_execution"]["job_attempt"] == 1
+    end
 
     repeat_result =
       record_saved_reset!(rule_alpha, identity, timestamp(~U[2026-05-30 15:10:00Z]), "repeat")
@@ -120,7 +131,9 @@ defmodule CodexPooler.Alerts.SavedResetDeliveryDedupeTest do
     assert :ok = enqueue_lifecycle_deliveries(resolved_result)
     assert delivery_attempts_for(alpha_result.incident, channel) == [attempt]
     assert delivery_attempts_for(alpha_result.incident, beta_channel) == [beta_attempt]
-    assert delivery_job_count() == 2
+    assert delivery_job_count() == 0
+    assert Repo.aggregate(Oban.Job, :count) == 2
+    CodexPooler.TestDiagnostics.puts("saved-reset-delivery completed_jobs=2 sent_receipts=2 matching_execution_bindings=2 enqueued_after_repeats=0")
   end
 
   defp timestamp(value), do: %{value | microsecond: {0, 6}}

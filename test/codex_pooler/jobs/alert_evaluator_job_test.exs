@@ -297,17 +297,28 @@ defmodule CodexPooler.Jobs.AlertEvaluatorJobTest do
 
     assert [delivery_job] = all_enqueued(worker: AlertDeliveryWorker)
 
-    assert :ok = perform_job(AlertDeliveryWorker, delivery_job.args)
+    # The evaluator fixture still owns its queued evaluation row; drain only
+    # the already-enqueued delivery, preserving its durable identity.
+    delivery_queue = "evaluator_delivery_#{System.unique_integer([:positive])}"
+    delivery_job |> Ecto.Changeset.change(queue: delivery_queue) |> Repo.update!()
+    assert %{success: 1, failure: 0, cancelled: 0, discard: 0, snoozed: 0} = Oban.drain_queue(queue: delivery_queue)
+    assert %{state: "completed", attempt: 1} = Repo.get!(Oban.Job, delivery_job.id)
 
     assert [
              %AlertDeliveryAttempt{
                status: "sent",
                attempted_at: delivery_attempted_at,
-               completed_at: delivery_attempted_at
+               completed_at: delivery_completed_at,
+               response_metadata: delivery_metadata
              }
            ] = Repo.all(AlertDeliveryAttempt)
 
     assert %DateTime{} = delivery_attempted_at
+    assert %DateTime{} = delivery_completed_at
+    assert DateTime.compare(delivery_completed_at, delivery_attempted_at) in [:eq, :gt]
+    assert delivery_metadata["delivery_execution"]["job_id"] == delivery_job.id
+    assert delivery_metadata["delivery_execution"]["job_attempt"] == 1
+    CodexPooler.TestDiagnostics.puts("evaluator-delivery completed_job=true matching_execution_binding=true completion_after_start=true elapsed_microseconds=#{DateTime.diff(delivery_completed_at, delivery_attempted_at, :microsecond)}")
 
     assert_email_sent(fn email ->
       assert email.subject == "Codex Pooler alert: critical: pool_no_usable_assignments"
