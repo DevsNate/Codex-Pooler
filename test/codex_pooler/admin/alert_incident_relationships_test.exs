@@ -184,6 +184,41 @@ defmodule CodexPooler.Admin.AlertIncidentRelationshipsTest do
 
     assert %{^incident_id => owner_summary} = owner_projections.delivery_summaries_by_incident
     assert owner_summary.total_count == 2
+
+    assert {:ok, page} = AlertIncidentRelationships.list_incident_page(admin_scope, %{channel_id: visible_channel.id}, limit: 1)
+    assert page.total_count == 1
+    assert [%{id: ^incident_id, hidden_impacted_pool_count: 1}] = page.incidents
+
+    for filters <- [%{channel_id: hidden_channel.id}, %{rule_id: hidden_rule.id}] do
+      assert {:ok, %{incidents: [], total_count: 0}} = AlertIncidentRelationships.list_incident_page(admin_scope, filters, limit: 1)
+    end
+
+    assert {:ok, %{incidents: [], total_count: 0}} = AlertIncidentRelationships.list_incident_page(owner_scope, %{pool_id: assigned_pool.id, rule_id: hidden_rule.id}, limit: 1)
+    assert {:ok, %{total_count: 1}} = AlertIncidentRelationships.list_incident_page(owner_scope, %{rule_id: hidden_rule.id}, limit: 1)
+  end
+
+  test "selected Pool relationships retain manageable roots outside the rendered page" do
+    %{user: owner} = bootstrap_owner_fixture(%{"email" => unique_user_email()})
+    scope = Scope.for_user(owner)
+    selected_pool = pool_fixture()
+    root_pool = pool_fixture()
+    selected_rule = alert_rule_fixture(selected_pool)
+    root_rule = alert_rule_fixture(root_pool)
+    observed_at = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    older_root = alert_incident_fixture(pool: root_pool, last_seen_at: DateTime.add(observed_at, -60), severity: "info")
+    alert_incident_target_fixture(older_root, selected_rule, selected_pool)
+    newest = alert_incident_fixture(pool: selected_pool, last_seen_at: observed_at)
+    alert_incident_target_fixture(newest, selected_rule, selected_pool)
+    alert_incident_target_fixture(newest, root_rule, root_pool)
+
+    assert {:ok, page} = AlertIncidentRelationships.list_incident_page(scope, %{pool_id: selected_pool.id, severity: "critical", rule_id: root_rule.id}, limit: 1)
+    assert page.total_count == 1
+    assert [row] = page.incidents
+    assert row.id == newest.id
+    assert Enum.map(row.impacted_pools, & &1.id) == [selected_pool.id]
+    assert row.hidden_impacted_pool_count == 1
+    projections = AlertIncidentRelationships.incident_relationship_projections(scope, page.incidents, page.relationship_pool_ids)
+    assert Enum.any?(projections.linked_rules_by_incident[row.id], &(&1.value == root_rule.id))
   end
 
   defp link_rule_channel!(rule, channel) do

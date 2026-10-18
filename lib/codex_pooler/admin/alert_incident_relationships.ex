@@ -93,22 +93,29 @@ defmodule CodexPooler.Admin.AlertIncidentRelationships do
   @spec list_incidents(Scope.t(), incident_filters()) ::
           {:ok, [Alerts.incident_projection()]} | {:error, Alerts.access_error()}
   def list_incidents(%Scope{} = scope, filters) when is_map(filters) do
-    opts =
-      []
-      |> maybe_put_opt(:pool_id, Map.get(filters, :pool_id))
-      |> maybe_put_opt(:state, Map.get(filters, :state))
+    Alerts.list_incidents(scope, incident_options(filters))
+  end
 
-    Alerts.list_incidents(scope, opts)
+  @spec list_incident_page(Scope.t(), incident_filters(), keyword()) :: {:ok, Alerts.incident_page()} | {:error, Alerts.access_error()}
+  def list_incident_page(%Scope{} = scope, filters, window) when is_map(filters) and is_list(window) do
+    Alerts.list_incident_page(scope, Keyword.merge(incident_options(filters), Keyword.take(window, [:limit, :offset])))
+  end
+
+  defp incident_options(filters) do
+    Enum.reduce([:pool_id, :state, :severity, :rule_id, :channel_id], [], fn key, opts -> maybe_put_opt(opts, key, Map.get(filters, key)) end)
   end
 
   @spec incident_relationship_projections(Scope.t(), [Alerts.incident_projection()]) ::
           incident_relationship_projections()
-  def incident_relationship_projections(%Scope{} = scope, incidents) when is_list(incidents) do
+  def incident_relationship_projections(scope, incidents), do: incident_relationship_projections(scope, incidents, nil)
+
+  @spec incident_relationship_projections(Scope.t(), [Alerts.incident_projection()], [Ecto.UUID.t()] | nil) :: incident_relationship_projections()
+  def incident_relationship_projections(%Scope{} = scope, incidents, relationship_pool_ids) when is_list(incidents) do
     incident_ids = incident_ids(incidents)
 
     with [_ | _] <- incident_ids,
          {:ok, channels} <- Alerts.list_channels(scope),
-         {:ok, visible_pool_ids} <- visible_pool_ids(scope, incidents) do
+         {:ok, visible_pool_ids} <- visible_pool_ids(scope, incidents, relationship_pool_ids) do
       visible_channel_ids = Enum.map(channels, & &1.id)
 
       %{
@@ -120,16 +127,15 @@ defmodule CodexPooler.Admin.AlertIncidentRelationships do
     end
   end
 
-  def incident_relationship_projections(_scope, _incidents), do: empty_relationship_projections()
+  def incident_relationship_projections(_scope, _incidents, _relationship_pool_ids), do: empty_relationship_projections()
 
-  defp visible_pool_ids(scope, incidents) do
+  defp visible_pool_ids(scope, incidents, relationship_pool_ids) do
     case Alerts.list_manageable_pools(scope) do
       {:ok, pools} ->
         manageable_pool_ids = pools |> Enum.map(& &1.id) |> MapSet.new()
 
         visible_pool_ids =
-          incidents
-          |> Enum.flat_map(&incident_visible_pool_ids/1)
+          (relationship_pool_ids || Enum.flat_map(incidents, &incident_visible_pool_ids/1))
           |> Enum.uniq()
           |> Enum.filter(&MapSet.member?(manageable_pool_ids, &1))
 

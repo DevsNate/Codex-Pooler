@@ -7,12 +7,14 @@ defmodule CodexPooler.Alerts.Incidents.IncidentNotifications do
   alias CodexPooler.Accounts.Scope
   alias CodexPooler.Alerts.AuditLog, as: AlertAudit
   alias CodexPooler.Alerts.Authorization
+  alias CodexPooler.Alerts.ChannelManagement
   alias CodexPooler.Alerts.Incidents.NotificationEvents
 
   alias CodexPooler.Alerts.Schemas.{
     AlertIncident,
     AlertIncidentReceipt,
-    AlertIncidentTarget
+    AlertIncidentTarget,
+    AlertRuleChannel
   }
 
   alias CodexPooler.Pools.Pool
@@ -48,6 +50,7 @@ defmodule CodexPooler.Alerts.Incidents.IncidentNotifications do
           created_at: DateTime.t(),
           updated_at: DateTime.t()
         }
+  @type incident_page :: %{incidents: [incident_projection()], total_count: non_neg_integer(), relationship_pool_ids: [Ecto.UUID.t()]}
   @type incident_result ::
           {:ok, incident_projection()} | {:error, Ecto.Changeset.t() | access_error()}
   @type notification_receipt_result ::
@@ -58,19 +61,103 @@ defmodule CodexPooler.Alerts.Incidents.IncidentNotifications do
   def list_incidents(scope, opts \\ [])
 
   def list_incidents(%Scope{} = scope, opts) when is_list(opts) do
-    with {:ok, pool_ids} <-
-           Authorization.authorized_pool_filter(scope, Keyword.get(opts, :pool_id)) do
-      incidents =
-        incident_query(pool_ids, opts)
-        |> Repo.all()
-        |> incident_projections(pool_ids)
-
-      {:ok, incidents}
+    with {:ok, query, pool_ids, _relationship_pool_ids} <- filtered_incident_query(scope, opts) do
+      {:ok, load_incident_window(query, pool_ids, opts)}
     end
   end
 
   def list_incidents(_scope, _opts),
     do: {:error, Authorization.access_error(:invalid_request, "user scope is required")}
+
+  @spec list_incident_page(term(), keyword()) :: {:ok, incident_page()} | {:error, access_error()}
+  def list_incident_page(scope, opts \\ [])
+
+  def list_incident_page(%Scope{} = scope, opts) when is_list(opts) do
+    with {:ok, query, pool_ids, relationship_pool_ids} <- filtered_incident_query(scope, opts) do
+      total_count = query |> exclude(:order_by) |> Repo.aggregate(:count)
+      {:ok, %{incidents: load_incident_window(query, pool_ids, opts), total_count: total_count, relationship_pool_ids: relationship_pool_ids}}
+    end
+  end
+
+  def list_incident_page(_scope, _opts),
+    do: {:error, Authorization.access_error(:invalid_request, "user scope is required")}
+
+  defp load_incident_window(query, pool_ids, opts) do
+    query
+    |> limit(^Keyword.get(opts, :limit, 50))
+    |> offset(^Keyword.get(opts, :offset, 0))
+    |> Repo.all()
+    |> incident_projections(pool_ids)
+  end
+
+  defp filtered_incident_query(scope, opts) do
+    with :ok <- validate_incident_options(opts),
+         {:ok, pool_ids} <- Authorization.authorized_pool_filter(scope, Keyword.get(opts, :pool_id)),
+         {:ok, relationship_pool_ids} <- relationship_pool_ids(scope, pool_ids, opts) do
+      query =
+        incident_query(pool_ids, opts)
+        |> maybe_filter_incident_severity(Keyword.get(opts, :severity))
+        |> maybe_filter_incident_rule(relationship_pool_ids, Keyword.get(opts, :rule_id))
+        |> maybe_filter_incident_channel(scope, relationship_pool_ids, Keyword.get(opts, :channel_id))
+
+      {:ok, query, pool_ids, relationship_pool_ids}
+    end
+  end
+
+  defp validate_incident_options(opts) do
+    limit = Keyword.get(opts, :limit, 50)
+    offset = Keyword.get(opts, :offset, 0)
+
+    if is_integer(limit) and limit in 1..500 and is_integer(offset) and offset >= 0 and
+         Keyword.get(opts, :state) in [nil | AlertIncident.states()] and
+         Keyword.get(opts, :severity) in [nil | AlertIncident.severities()] and
+         Enum.all?([:rule_id, :channel_id], &valid_optional_uuid?(Keyword.get(opts, &1))) do
+      :ok
+    else
+      {:error, Authorization.access_error(:invalid_request, "incident filters or window are invalid")}
+    end
+  end
+
+  defp valid_optional_uuid?(nil), do: true
+  defp valid_optional_uuid?(value), do: match?({:ok, _uuid}, Ecto.UUID.cast(value))
+
+  defp relationship_pool_ids(scope, pool_ids, opts) do
+    if is_nil(Keyword.get(opts, :pool_id)) do
+      {:ok, pool_ids}
+    else
+      with {:ok, manageable_pool_ids} <- Authorization.authorized_pool_filter(scope, nil) do
+        # Historical relationships include manageable root Pools from every visible
+        # incident, before severity/link filters and paging, as well as target Pools.
+        root_pool_ids =
+          incident_query(pool_ids, opts)
+          |> exclude(:order_by)
+          |> where([incident], incident.pool_id in ^manageable_pool_ids)
+          |> select([incident], incident.pool_id)
+          |> distinct(true)
+          |> Repo.all()
+
+        {:ok, Enum.uniq(pool_ids ++ root_pool_ids)}
+      end
+    end
+  end
+
+  defp maybe_filter_incident_severity(query, nil), do: query
+  defp maybe_filter_incident_severity(query, severity), do: where(query, [incident], incident.severity == ^severity)
+
+  defp maybe_filter_incident_rule(query, _pool_ids, nil), do: query
+
+  defp maybe_filter_incident_rule(query, pool_ids, rule_id) do
+    where(query, [incident], exists(from target in AlertIncidentTarget, where: target.incident_id == parent_as(:incident).id and target.pool_id in ^pool_ids and target.rule_id == ^rule_id, select: 1))
+  end
+
+  defp maybe_filter_incident_channel(query, _scope, _pool_ids, nil), do: query
+
+  defp maybe_filter_incident_channel(query, scope, pool_ids, channel_id) do
+    {:ok, channels} = ChannelManagement.list_channels(scope)
+    visible_channel_ids = Enum.map(channels, & &1.id)
+
+    where(query, [incident], exists(from target in AlertIncidentTarget, join: link in AlertRuleChannel, on: link.alert_rule_id == target.rule_id, where: target.incident_id == parent_as(:incident).id and target.pool_id in ^pool_ids and link.alert_channel_id == ^channel_id and link.alert_channel_id in ^visible_channel_ids, select: 1))
+  end
 
   @spec acknowledge_incident(term(), AlertIncident.t() | Ecto.UUID.t()) :: incident_result()
   def acknowledge_incident(scope, incident_or_id),
@@ -346,11 +433,19 @@ defmodule CodexPooler.Alerts.Incidents.IncidentNotifications do
     )
   end
 
-  defp incident_projections(incidents, pool_ids),
-    do: Enum.map(incidents, &incident_projection(&1, pool_ids))
+  defp incident_projections([], _pool_ids), do: []
+
+  defp incident_projections(incidents, pool_ids) do
+    targets = incidents |> Enum.map(& &1.id) |> incident_pool_targets() |> Enum.group_by(& &1.incident_id)
+    Enum.map(incidents, &incident_projection(&1, pool_ids, Map.get(targets, &1.id, [])))
+  end
 
   defp incident_projection(%AlertIncident{} = incident, pool_ids) do
-    pool_targets = incident.id |> incident_pool_targets() |> Enum.uniq_by(& &1.pool_id)
+    incident_projection(incident, pool_ids, incident_pool_targets([incident.id]))
+  end
+
+  defp incident_projection(%AlertIncident{} = incident, pool_ids, targets) do
+    pool_targets = Enum.uniq_by(targets, & &1.pool_id)
     visible_targets = Enum.filter(pool_targets, &(&1.pool_id in pool_ids))
     total_count = length(pool_targets)
     visible_count = length(visible_targets)
@@ -380,14 +475,14 @@ defmodule CodexPooler.Alerts.Incidents.IncidentNotifications do
     }
   end
 
-  defp incident_pool_targets(incident_id) do
+  defp incident_pool_targets(incident_ids) do
     Repo.all(
       from target in AlertIncidentTarget,
         join: pool in Pool,
         on: pool.id == target.pool_id,
-        where: target.incident_id == ^incident_id,
+        where: target.incident_id in ^incident_ids,
         order_by: [asc: pool.created_at, asc: pool.id],
-        select: %{pool_id: pool.id, pool_slug: pool.slug, pool_name: pool.name}
+        select: %{incident_id: target.incident_id, pool_id: pool.id, pool_slug: pool.slug, pool_name: pool.name}
     )
   end
 

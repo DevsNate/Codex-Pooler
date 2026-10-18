@@ -196,6 +196,108 @@ defmodule CodexPoolerWeb.Admin.AlertIncidentsReadModelTest do
            }
   end
 
+  @tag slow: "compares real database query and result-row budgets with 2000 incident/target pairs"
+  test "incident page queries stay bounded as history grows", %{scope: scope} do
+    pool = pool_fixture()
+    rule = alert_rule_fixture(pool)
+    handler_id = "incident-page-queries-#{unique_suffix()}"
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+    :ok = :telemetry.attach(handler_id, [:codex_pooler, :repo, :query], &__MODULE__.capture_page_query/4, self())
+
+    measurements =
+      for {additional, total} <- [{60, 60}, {140, 200}, {1800, 2000}] do
+        insert_incident_history!(pool, rule, additional)
+
+        drain_page_queries()
+        page = AlertIncidentsReadModel.load(scope, %{"pool_id" => pool.id})
+        queries = drain_page_queries()
+        assert length(page.incidents) == 50
+        assert page.total_count == total
+        incident_rows = for {"alert_incidents", rows} <- queries, do: rows
+        target_rows = for {"alert_incident_targets", rows} <- queries, do: rows
+        assert Enum.max(incident_rows) == 50
+        assert target_rows == [50, 50]
+        %{stored: total, queries: length(queries), target_queries: length(target_rows)}
+      end
+
+    assert Enum.uniq_by(measurements, & &1.queries) |> length() == 1, inspect(measurements)
+    assert Enum.all?(measurements, &(&1.target_queries == 2)), inspect(measurements)
+  end
+
+  test "filters find older matches before limiting and count all matches", %{scope: scope} do
+    pool = pool_fixture()
+    first_rule = alert_rule_fixture(pool)
+    channel_rule = alert_rule_fixture(pool)
+    channel = alert_channel_fixture()
+    link_rule_channel!(channel_rule, channel)
+    observed_at = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    matching =
+      for _ <- 1..51 do
+        incident = alert_incident_fixture(pool: pool, severity: "warning", last_seen_at: DateTime.add(observed_at, -60))
+        alert_incident_target_fixture(incident, first_rule, pool)
+        alert_incident_target_fixture(incident, channel_rule, pool, resolved_at: observed_at)
+        incident
+      end
+
+    for _ <- 1..60, do: alert_incident_fixture(pool: pool, severity: "critical", last_seen_at: observed_at)
+    expected_ids = matching |> Enum.sort_by(& &1.id, :desc) |> Enum.take(50) |> Enum.map(& &1.id)
+
+    for filters <- [
+          %{"severity" => "warning"},
+          %{"rule_id" => first_rule.id},
+          %{"channel_id" => channel.id},
+          %{"severity" => "warning", "state" => "open", "rule_id" => first_rule.id, "channel_id" => channel.id}
+        ] do
+      page = AlertIncidentsReadModel.load(scope, Map.put(filters, "pool_id", pool.id))
+      assert page.filter_errors == []
+      assert page.total_count == 51
+      assert Enum.map(page.incidents, & &1.id) == expected_ids
+      assert Enum.all?(page.incidents, &(&1.visible_impacted_pool_count == 1))
+    end
+
+    for {key, value} <- [{"severity", "unknown"}, {"state", "unknown"}, {"rule_id", Ecto.UUID.generate()}, {"channel_id", "invalid"}, {"pool_id", Ecto.UUID.generate()}] do
+      page = AlertIncidentsReadModel.load(scope, %{key => value})
+      assert page.filter_errors != []
+      assert page.incidents == []
+      assert page.total_count == 0
+    end
+  end
+
+  defp insert_incident_history!(pool, rule, count) do
+    observed_at = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    incidents =
+      for _ <- 1..count do
+        id = Ecto.UUID.generate()
+        %{id: id, dedupe_key: "alert:history:#{id}", scope_type: "pool", rule_kind: "pool_no_usable_assignments", severity: "critical", state: "open", pool_id: pool.id, occurrence_count: 1, first_seen_at: observed_at, last_seen_at: observed_at, safe_evidence_snapshot: %{}, suppression_metadata: %{}, created_at: observed_at, updated_at: observed_at}
+      end
+
+    targets =
+      Enum.map(incidents, fn incident ->
+        %{id: Ecto.UUID.generate(), incident_id: incident.id, rule_id: rule.id, pool_id: pool.id, first_matched_at: observed_at, last_matched_at: observed_at, metadata: %{}, created_at: observed_at, updated_at: observed_at}
+      end)
+
+    assert {^count, nil} = Repo.insert_all(CodexPooler.Alerts.Schemas.AlertIncident, incidents)
+    assert {^count, nil} = Repo.insert_all(CodexPooler.Alerts.Schemas.AlertIncidentTarget, targets)
+  end
+
+  @doc false
+  def capture_page_query(_event, _measurements, metadata, emitter) do
+    if self() == emitter do
+      {:ok, %{num_rows: row_count}} = metadata.result
+      send(emitter, {:incident_page_query, {metadata.source, row_count}})
+    end
+  end
+
+  defp drain_page_queries(acc \\ []) do
+    receive do
+      {:incident_page_query, source} -> drain_page_queries([source | acc])
+    after
+      0 -> acc
+    end
+  end
+
   defp link_rule_channel!(rule, channel) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 

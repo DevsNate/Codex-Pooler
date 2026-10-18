@@ -227,6 +227,23 @@ defmodule CodexPooler.Alerts.IncidentVisibilityTest do
     assert {:ok, []} = Alerts.list_incidents(admin_scope)
   end
 
+  test "listing windows preserve order and reject invalid bounds" do
+    %{user: owner} = bootstrap_owner_fixture(%{"email" => unique_user_email()})
+    scope = Scope.for_user(owner)
+    pool = pool_fixture()
+    observed_at = now()
+    incidents = for _ <- 1..3, do: alert_incident_fixture(pool: pool, last_seen_at: observed_at)
+    expected = incidents |> Enum.sort_by(& &1.id, :desc) |> Enum.at(1)
+
+    assert {:ok, [incident]} = Alerts.list_incidents(scope, pool_id: pool.id, limit: 1, offset: 1)
+    assert incident.id == expected.id
+    assert {:ok, []} = Alerts.list_incidents(scope, pool_id: pool.id, limit: 1, offset: 3)
+
+    for opts <- [[limit: 0], [limit: -1], [limit: "50"], [limit: 501], [offset: -1], [offset: "0"]] do
+      assert {:error, %{code: :invalid_request}} = Alerts.list_incidents(scope, opts)
+    end
+  end
+
   defp pool_projection(pool), do: %{id: pool.id, slug: pool.slug, name: pool.name}
 
   defp alert_incident_target_count(incident_id) do

@@ -35,6 +35,7 @@ defmodule CodexPooler.Alerts do
   @type channel_result :: ChannelManagement.channel_result()
   @type pool_target :: IncidentNotifications.pool_target()
   @type incident_projection :: IncidentNotifications.incident_projection()
+  @type incident_page :: IncidentNotifications.incident_page()
   @type incident_result :: IncidentNotifications.incident_result()
   @type evaluation_rule_result :: RuleEvaluation.evaluation_rule_result()
   @type incident_ref :: IncidentNotifications.incident_ref()
@@ -72,6 +73,9 @@ defmodule CodexPooler.Alerts do
   @spec list_incidents(term(), keyword()) ::
           {:ok, [incident_projection()]} | {:error, access_error()}
   defdelegate list_incidents(scope, opts \\ []), to: IncidentNotifications
+
+  @spec list_incident_page(term(), keyword()) :: {:ok, incident_page()} | {:error, access_error()}
+  defdelegate list_incident_page(scope, opts \\ []), to: IncidentNotifications
 
   @spec acknowledge_incident(term(), AlertIncident.t() | Ecto.UUID.t()) :: incident_result()
   defdelegate acknowledge_incident(scope, incident_or_id), to: IncidentNotifications

@@ -103,15 +103,15 @@ defmodule CodexPoolerWeb.Admin.AlertIncidentsReadModel do
     rules = visible_rules(scope)
     channels = visible_channels(scope)
     {filters, form_values, filter_errors} = parse_filters(params, pools, rules, channels)
-    incidents = load_incidents(scope, filters, filter_errors)
-    rows = incident_rows(scope, incidents, filters)
+    page = load_incidents(scope, filters, filter_errors)
+    rows = incident_rows(scope, page.incidents, page.relationship_pool_ids)
 
     %{
       manageable_pools: pools,
       pool_lookup: Map.new(pools, &{&1.id, &1}),
       rules: rules,
       channels: channels,
-      incidents: Enum.take(rows, @page_size),
+      incidents: rows,
       filter_form: to_form(form_values, as: :filters, errors: form_errors(filter_errors)),
       filter_values: form_values,
       filter_errors: filter_errors,
@@ -120,7 +120,7 @@ defmodule CodexPoolerWeb.Admin.AlertIncidentsReadModel do
       state_filter_options: state_filter_options(),
       rule_filter_options: rule_filter_options(rules),
       channel_filter_options: channel_filter_options(channels),
-      total_count: length(rows),
+      total_count: page.total_count,
       page_size: @page_size
     }
   end
@@ -265,17 +265,19 @@ defmodule CodexPoolerWeb.Admin.AlertIncidentsReadModel do
     end
   end
 
-  defp load_incidents(_scope, _filters, [_error | _errors]), do: []
+  defp load_incidents(_scope, _filters, [_error | _errors]), do: empty_incident_page()
 
   defp load_incidents(scope, filters, []) do
-    case AlertIncidentRelationships.list_incidents(scope, filters) do
-      {:ok, incidents} -> incidents
-      {:error, _reason} -> []
+    case AlertIncidentRelationships.list_incident_page(scope, filters, limit: @page_size) do
+      {:ok, page} -> page
+      {:error, _reason} -> empty_incident_page()
     end
   end
 
-  defp incident_rows(scope, incidents, filters) do
-    projections = AlertIncidentRelationships.incident_relationship_projections(scope, incidents)
+  defp empty_incident_page, do: %{incidents: [], total_count: 0, relationship_pool_ids: []}
+
+  defp incident_rows(scope, incidents, relationship_pool_ids) do
+    projections = AlertIncidentRelationships.incident_relationship_projections(scope, incidents, relationship_pool_ids)
     upstream_account_labels = upstream_account_labels(incidents)
 
     linked_rules_by_incident = projections.linked_rules_by_incident
@@ -284,10 +286,7 @@ defmodule CodexPoolerWeb.Admin.AlertIncidentsReadModel do
       projections.delivery_summaries_by_incident
       |> Map.new(fn {incident_id, summary} -> {incident_id, delivery_summary(summary)} end)
 
-    incidents
-    |> Enum.filter(&incident_matches_severity?(&1, filters.severity))
-    |> Enum.map(&incident_row(&1, linked_rules_by_incident, delivery_summaries, upstream_account_labels))
-    |> Enum.filter(&incident_matches_link_filters?(&1, filters))
+    Enum.map(incidents, &incident_row(&1, linked_rules_by_incident, delivery_summaries, upstream_account_labels))
   end
 
   defp incident_row(
@@ -326,24 +325,6 @@ defmodule CodexPoolerWeb.Admin.AlertIncidentsReadModel do
       linked_channels: linked_channels(linked_rules),
       delivery_summary: Map.get(delivery_summaries, incident.id, empty_delivery_summary())
     }
-  end
-
-  defp incident_matches_severity?(_incident, nil), do: true
-  defp incident_matches_severity?(incident, severity), do: incident.severity == severity
-
-  defp incident_matches_rule?(_row, nil), do: true
-
-  defp incident_matches_rule?(row, rule_id),
-    do: Enum.any?(row.linked_rules, &(&1.value == rule_id))
-
-  defp incident_matches_channel?(_row, nil), do: true
-
-  defp incident_matches_channel?(row, channel_id),
-    do: Enum.any?(row.linked_channels, &(&1.value == channel_id))
-
-  defp incident_matches_link_filters?(row, filters) do
-    incident_matches_rule?(row, filters.rule_id) and
-      incident_matches_channel?(row, filters.channel_id)
   end
 
   defp delivery_summary(summary) do
