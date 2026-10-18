@@ -17,14 +17,16 @@ defmodule CodexPooler.Gateway.Routing.BridgeRingTest do
   }
 
   alias CodexPooler.Gateway.Routing.AffinityTelemetry
-  alias CodexPooler.Gateway.Routing.{BridgeRing, RoutePlanInput}
+  alias CodexPooler.Gateway.Routing.{BridgeRing, ProviderCredits, RoutePlanInput}
   alias CodexPooler.Gateway.Routing.SessionContinuity, as: RoutingSessionContinuity
   alias CodexPooler.Gateway.Runtime.Dispatch.RouteState
   alias CodexPooler.Pools
   alias CodexPooler.Pools.RoutingStrategy
+  alias CodexPooler.Quotas.CapacityFacts
   alias CodexPooler.Repo
   alias CodexPooler.Upstreams.Quota.AccountAvailabilityStore
   alias CodexPooler.Upstreams.Quota.AccountQuotaWindow
+  alias CodexPooler.Upstreams.Quota.CapacityFactsStore
   alias CodexPooler.Upstreams.Quota.RoutingQuotaSnapshot
   alias CodexPooler.Upstreams.Schemas.UpstreamIdentity
 
@@ -32,34 +34,11 @@ defmodule CodexPooler.Gateway.Routing.BridgeRingTest do
 
   describe "plan_route/1 leaf ordering" do
     test "ring truncation keeps ordinary quota ahead of an earlier windowless candidate" do
-      setup = routing_setup(2)
-      snapshot_at = DateTime.utc_now() |> DateTime.truncate(:second)
-      [windowless_assignment, ordinary_assignment] = setup.assignments
-      [windowless_identity, ordinary_identity] = setup.identities
+      %{setup: setup, candidates: [windowless, ordinary], route_state: route_state} =
+        tiered_setup([:windowless, :ordinary])
 
-      windowless_identity = %{
-        windowless_identity
-        | metadata:
-            Map.put(
-              windowless_identity.metadata,
-              AccountAvailabilityStore.metadata_key(),
-              AccountAvailabilityStore.encode!(:available, snapshot_at, 1)
-            )
-      }
-
-      windowless_candidate = {windowless_assignment, windowless_identity}
-      ordinary_candidate = {ordinary_assignment, ordinary_identity}
-      candidates = [windowless_candidate, ordinary_candidate]
-
-      route_state =
-        RouteState.new(%{visible_model: setup.model, candidates: candidates})
-        |> put_test_quota_snapshots(
-          %{
-            windowless_identity.id => [],
-            ordinary_identity.id => [account_window_at(Decimal.new("20"), snapshot_at)]
-          },
-          snapshot_at
-        )
+      ordinary_assignment = elem(ordinary, 0)
+      candidates = [windowless, ordinary]
 
       plan =
         plan_for(setup, "deterministic_rotation", seed_rotating_to_index(0, 2),
@@ -1348,6 +1327,42 @@ defmodule CodexPooler.Gateway.Routing.BridgeRingTest do
   # an ordering penalty inside it: ordinary_active ++ ordinary_demoted ++
   # windowless_active ++ windowless_demoted, each group in strategy order.
   describe "plan_route/1 windowless tier and demotion precedence" do
+    test "weekly-only and precise ordinary capacity retain strategy and demotion order" do
+      %{setup: setup, candidates: [weekly, ordinary], route_state: route_state} =
+        tiered_setup([:weekly, :ordinary])
+
+      plan = tiered_plan(setup, [weekly, ordinary], route_state)
+      assert candidate_ids(plan.candidates) == candidate_ids([weekly, ordinary])
+
+      demote!(setup, weekly)
+      demoted_plan = tiered_plan(setup, [weekly, ordinary], route_state)
+      assert candidate_ids(demoted_plan.candidates) == candidate_ids([ordinary, weekly])
+    end
+
+    test "credits follow independent non-credit capacity and precede legacy windowless capacity" do
+      %{setup: setup, candidates: [legacy, credit, windowless, ordinary], route_state: route_state} =
+        tiered_setup([:legacy_windowless, :credits, :windowless, :ordinary])
+
+      demote!(setup, ordinary)
+      demote!(setup, windowless)
+      demote!(setup, credit)
+
+      plan = tiered_plan(setup, [legacy, credit, windowless, ordinary], route_state)
+
+      assert candidate_ids(plan.candidates) == candidate_ids([ordinary, windowless, credit, legacy])
+      assert plan.selected_assignment_id == candidate_id(ordinary)
+    end
+
+    test "legacy windowless capacity remains behind ordinary capacity before truncation" do
+      %{setup: setup, candidates: [legacy, ordinary], route_state: route_state} =
+        tiered_setup([:legacy_windowless, :ordinary])
+
+      demote!(setup, ordinary)
+      plan = tiered_plan(setup, [legacy, ordinary], route_state, ring_size: 1)
+
+      assert candidate_ids(plan.candidates) == candidate_ids([ordinary])
+    end
+
     test "a demoted ordinary candidate stays ahead of an active windowless candidate" do
       %{setup: setup, candidates: [windowless, ordinary], route_state: route_state} =
         tiered_setup([:windowless, :ordinary])
@@ -2907,15 +2922,24 @@ defmodule CodexPooler.Gateway.Routing.BridgeRingTest do
       setup.candidates
       |> Enum.zip(tiers)
       |> Enum.map(fn
-        {{assignment, identity}, :windowless} ->
+        {{assignment, identity}, tier} when tier in [:windowless, :legacy_windowless, :credits] ->
           availability = AccountAvailabilityStore.encode!(:available, snapshot_at, 1)
 
           metadata =
             Map.put(identity.metadata, AccountAvailabilityStore.metadata_key(), availability)
 
-          {assignment, %{identity | metadata: metadata}}
+          metadata =
+            if tier == :legacy_windowless do
+              metadata
+            else
+              facts = %CapacityFacts{observed_at: snapshot_at, included_permission: if(tier == :credits, do: :exhausted, else: :available), credit_permission: if(tier == :credits, do: :available, else: :unknown), denial_category: if(tier == :credits, do: :included_limit, else: :none), balance: if(tier == :credits, do: "1"), has_credits: tier == :credits, account_windows: [], source_kind: :wham_usage}
+              CapacityFactsStore.transition(metadata, facts, 1)
+            end
 
-        {candidate, :ordinary} ->
+          identity = identity |> Ecto.Changeset.change(metadata: metadata, allow_provider_credits: true) |> Repo.update!()
+          {assignment, identity}
+
+        {candidate, tier} when tier in [:ordinary, :weekly] ->
           candidate
       end)
 
@@ -2923,16 +2947,31 @@ defmodule CodexPooler.Gateway.Routing.BridgeRingTest do
       candidates
       |> Enum.zip(tiers)
       |> Map.new(fn
-        {{_assignment, identity}, :windowless} ->
+        {{_assignment, identity}, tier} when tier in [:windowless, :legacy_windowless, :credits] ->
           {identity.id, []}
 
         {{_assignment, identity}, :ordinary} ->
           {identity.id, [account_window_at(Decimal.new("20"), snapshot_at)]}
+
+        {{_assignment, identity}, :weekly} ->
+          window = %{account_window_at(Decimal.new("20"), snapshot_at) | window_kind: "secondary", window_minutes: 10_080}
+          {identity.id, [window]}
       end)
 
     route_state =
       RouteState.new(%{visible_model: setup.model, candidates: candidates})
       |> put_test_quota_snapshots(windows_by_identity_id, snapshot_at)
+
+    expected_bases = %{ordinary: :included_window, weekly: :included_window, windowless: :windowless_provider_permission, legacy_windowless: :unknown_legacy, credits: :provider_credits}
+
+    Enum.each(Enum.zip(candidates, tiers), fn {{_assignment, identity}, tier} ->
+      snapshot = RouteState.quota_snapshot_for_identity(route_state, identity)
+      context = Map.merge(ProviderCredits.request_context(setup.model), %{serving_mode: :full, transport: :http_sse})
+      eligibility = ProviderCredits.eligibility(snapshot, context)
+      assert eligibility.eligible?
+      assert eligibility.capacity_basis == Map.fetch!(expected_bases, tier)
+      if tier == :weekly, do: assert(eligibility.routing_state == :weekly_only_probe)
+    end)
 
     %{setup: setup, candidates: candidates, route_state: route_state}
   end

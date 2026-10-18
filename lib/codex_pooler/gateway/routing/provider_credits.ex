@@ -76,10 +76,9 @@ defmodule CodexPooler.Gateway.Routing.ProviderCredits do
   @spec tier(map()) :: non_neg_integer()
   def tier(%{capacity_basis: :provider_credits}), do: 5
   def tier(%{capacity_basis: :unknown_legacy}), do: 6
-  def tier(%{routing_state: :weekly_only_probe}), do: 1
-  def tier(%{routing_state: :reset_probe}), do: 2
-  def tier(%{capacity_basis: basis}) when basis in [:ordinary_provider_permission, :model_allowance], do: 3
   def tier(%{capacity_basis: :windowless_provider_permission}), do: 4
+  # Ordinary capacity shares one group, including weekly and reset probes, so
+  # strategy, affinity and demotion keep their ordering within that group.
   def tier(_decision), do: 0
 
   defp physical_exclusion(physical, decision) do

@@ -728,8 +728,9 @@ defmodule CodexPooler.Gateway.Routing.BridgeRing do
     |> Map.new(&{&1.pool_upstream_assignment_id, &1})
   end
 
-  # Capacity basis is outermost; affinity, strategy and demotion never promote
-  # a credit-dependent candidate above a compatible non-credit candidate.
+  # Capacity group is outermost: ordinary, windowless, credits, then legacy.
+  # Demotion only changes ordering within a group; the sort preserves strategy
+  # and affinity order for candidates with the same group and demotion state.
   defp apply_quota_tier_and_demotions(candidates, demotions, %Model{} = model, route_state) do
     Enum.sort_by(candidates, fn {assignment, _identity} = candidate ->
       {capacity_tier(model, candidate, route_state), Map.has_key?(demotions, assignment.id)}
@@ -742,7 +743,7 @@ defmodule CodexPooler.Gateway.Routing.BridgeRing do
     snapshot = RouteState.quota_snapshot_for_identity(route_state, identity)
     context = ProviderCredits.request_context(model)
     eligibility = ProviderCredits.eligibility(snapshot, context)
-    if ProviderCredits.non_credit_basis?(eligibility.capacity_basis), do: 0, else: ProviderCredits.tier(eligibility)
+    ProviderCredits.tier(eligibility)
   end
 
   # One affinity row is one event record: the assignment, the identity, the
