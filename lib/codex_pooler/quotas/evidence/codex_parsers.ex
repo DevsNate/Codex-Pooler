@@ -399,7 +399,7 @@ defmodule CodexPooler.Quotas.Evidence.CodexParsers do
         reset_at: reset_at,
         used_percent: used_percent,
         source: "codex_rate_limit_error",
-        source_precision: "observed",
+        source_precision: ResetTimes.reset_source_precision(payload, reset_at),
         freshness_state: "fresh",
         last_sync_at: observed_at,
         observed_at: observed_at,

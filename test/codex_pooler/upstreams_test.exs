@@ -9983,23 +9983,30 @@ defmodule CodexPooler.UpstreamsTest do
       assert QuotaWindows.usable_window?(window, observed_at)
     end
 
-    test "normalizes explicit reset-bearing rate-limit error payloads" do
-      observed_at = ~U[2026-04-27 12:00:00Z]
+    test "persists countdown-derived rate-limit error resets as inferred evidence" do
+      identity = active_identity_fixture()
+      observed_at = DateTime.utc_now()
 
-      assert [evidence] =
-               Quotas.parse_rate_limit_error(
-                 %{
-                   "limit_id" => "codex_future_family",
-                   "window_kind" => "secondary",
-                   "window_minutes" => "10080",
-                   "used_percent" => "100",
-                   "reset_after_seconds" => "120"
-                 },
-                 observed_at
-               )
+      payload = %{
+        "limit_id" => "codex_future_family",
+        "window_kind" => "secondary",
+        "window_minutes" => "10080",
+        "used_percent" => "100",
+        "reset_after_seconds" => "120"
+      }
 
+      assert {:ok, [window]} =
+               QuotaWindows.upsert_quota_windows_from_codex_rate_limit_error(identity, payload, observed_at)
+
+      persisted = Repo.reload!(window)
+      assert persisted.source == "codex_rate_limit_error"
+      assert persisted.source_precision == "inferred"
+      assert persisted.merge_precedence == 60
+
+      assert [evidence] = Quotas.parse_rate_limit_error(payload, observed_at)
       assert evidence.source == "codex_rate_limit_error"
-      assert evidence.source_precision == "observed"
+      assert evidence.source_precision == "inferred"
+      assert evidence.merge_precedence == 60
       assert evidence.quota_scope == "feature"
       assert evidence.quota_family == "codex_future_family"
       assert evidence.raw_limit_id == "codex_future_family"
@@ -10007,6 +10014,8 @@ defmodule CodexPooler.UpstreamsTest do
       assert Decimal.equal?(evidence.used_percent, Decimal.new("100"))
       assert evidence.observed_at == observed_at
       assert DateTime.compare(evidence.reset_at, DateTime.add(observed_at, 120, :second)) == :eq
+
+      assert DateTime.compare(persisted.reset_at, evidence.reset_at) == :eq
     end
 
     test "remaps weekly-duration primary header slot to the weekly secondary window" do

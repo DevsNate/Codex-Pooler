@@ -147,6 +147,42 @@ defmodule CodexPooler.QuotasTest do
     assert [] = Quotas.parse_rate_limit_error(nil, @observed_at)
   end
 
+  test "countdown-only rate limit errors retain inferred reset evidence" do
+    payload = Map.put(error_payload(), "window_minutes", 10_080)
+
+    assert [evidence] = Quotas.parse_rate_limit_error(payload, @observed_at)
+    assert evidence.reset_at == @reset_at
+    assert evidence.source_precision == "inferred"
+    assert evidence.merge_precedence == 60
+  end
+
+  test "absolute rate limit error resets remain observed despite a countdown" do
+    payload =
+      error_payload()
+      |> Map.put("window_minutes", 10_080)
+      |> Map.put("reset_at", DateTime.to_iso8601(@reset_at))
+      |> Map.put("reset_after_seconds", 120)
+
+    assert [evidence] = Quotas.parse_rate_limit_error(payload, @observed_at)
+    assert evidence.reset_at == @reset_at
+    assert evidence.source_precision == "observed"
+    assert evidence.merge_precedence == 80
+  end
+
+  test "invalid absolute rate limit error resets fall back to inferred countdowns" do
+    payload =
+      error_payload()
+      |> Map.put("window_minutes", 10_080)
+      |> Map.put("reset_at", "invalid")
+
+    assert [evidence] = Quotas.parse_rate_limit_error(payload, @observed_at)
+    assert evidence.reset_at == @reset_at
+    assert evidence.source_precision == "inferred"
+    assert evidence.merge_precedence == 60
+
+    assert [] = Quotas.parse_rate_limit_error(Map.delete(payload, "reset_after_seconds"), @observed_at)
+  end
+
   defp usage_payload do
     %{
       "rate_limit" => %{
