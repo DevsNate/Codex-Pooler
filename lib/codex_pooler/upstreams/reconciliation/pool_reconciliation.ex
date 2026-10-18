@@ -861,8 +861,14 @@ defmodule CodexPooler.Upstreams.Reconciliation.PoolReconciliation do
     metadata = identity.metadata || %{}
     credential_epoch = CredentialFencing.credential_epoch(identity)
 
+    current_blocked? =
+      case AccountAvailabilityStore.load(metadata) do
+        {:ok, snapshot} -> AccountAvailabilityStore.blocked?(snapshot, credential_epoch, observed_at)
+        :error -> false
+      end
+
     metadata =
-      if ordinary_account_window?(windows) and
+      if ordinary_account_window?(windows) and not current_blocked? and
            not match?(
              %CodexPooler.Quotas.AccountAvailability{state: state}
              when state in [:available, :blocked],
