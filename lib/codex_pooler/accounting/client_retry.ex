@@ -689,16 +689,42 @@ defmodule CodexPooler.Accounting.ClientRetry do
   defp discover_admission_ancestry(request, _scope, depth) when depth >= @max_chain_depth, do: [request]
 
   defp discover_admission_ancestry(request, scope, depth) do
-    predecessor = Repo.one(from candidate in admission_requests(scope), join: link in RequestClientRetryLink, on: link.predecessor_request_id == candidate.id, where: link.successor_request_id == ^request.id, select: candidate)
+    remaining_depth = @max_chain_depth - depth
 
-    case predecessor do
-      %Request{} ->
-        ancestry = discover_admission_ancestry(predecessor, scope, depth + 1)
-        if admission_link_claim?(hd(ancestry), predecessor, request, scope), do: ancestry ++ [request], else: [request]
+    first =
+      from candidate in admission_requests(scope),
+        join: link in RequestClientRetryLink,
+        on: link.predecessor_request_id == candidate.id,
+        where: link.successor_request_id == ^request.id,
+        select: %{id: candidate.id, depth: 1}
 
-      nil ->
-        [request]
-    end
+    previous =
+      from candidate in admission_requests(scope),
+        join: link in RequestClientRetryLink,
+        on: link.predecessor_request_id == candidate.id,
+        join: ancestry in "admission_ancestry",
+        on: ancestry.id == link.successor_request_id,
+        where: ancestry.depth < ^remaining_depth,
+        select: %{id: candidate.id, depth: ancestry.depth + 1}
+
+    candidates = union_all(first, ^previous)
+
+    predecessors =
+      Request
+      |> recursive_ctes(true)
+      |> with_cte("admission_ancestry", as: ^candidates)
+      |> join(:inner, [candidate], ancestry in "admission_ancestry", on: candidate.id == ancestry.id)
+      |> order_by([_candidate, ancestry], desc: ancestry.depth)
+      |> Repo.all()
+
+    # Each discovery gets a fresh statement snapshot. Keep the supplied seed
+    # and the root-dependent unwind validation; locked admission revalidates
+    # current links, claims and sessions independently of this advisory read.
+    [oldest | successors] = predecessors ++ [request]
+
+    Enum.reduce(successors, [oldest], fn successor, ancestry ->
+      if admission_link_claim?(hd(ancestry), List.last(ancestry), successor, scope), do: ancestry ++ [successor], else: [successor]
+    end)
   end
 
   defp discover_linked_sessions(_original, _request, _scope, depth) when depth > @max_chain_depth, do: []

@@ -621,7 +621,7 @@ defmodule CodexPooler.Accounting.MailboxAdmissionChainLocksTest do
           handler,
           [:codex_pooler, :repo, :query],
           fn _event, _measurements, metadata, {actor, counter} ->
-            if self() == actor and metadata[:repo] == Repo and String.starts_with?(metadata[:query] || "", "SELECT"), do: :atomics.add(counter, 1, 1)
+            if self() == actor and metadata[:repo] == Repo and String.starts_with?(metadata[:query] || "", ["SELECT", "WITH"]), do: :atomics.add(counter, 1, 1)
           end,
           {actor, counter}
         )
@@ -634,7 +634,7 @@ defmodule CodexPooler.Accounting.MailboxAdmissionChainLocksTest do
         # The bound allows both fresh discovery walks and their exact session
         # sets, without a query for every ancestor's turn and session per hop.
         assert reads <= 48
-        emit_receipt(%{scenario: "sixteen_edge_discovery_cost", distinct_sessions: MapSet.size(expected), select_queries: reads})
+        emit_receipt(%{scenario: "sixteen_edge_discovery_cost", distinct_sessions: MapSet.size(expected), read_queries: reads})
       after
         :telemetry.detach(handler)
       end
