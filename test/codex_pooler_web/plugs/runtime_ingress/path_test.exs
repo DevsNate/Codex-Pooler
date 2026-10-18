@@ -35,7 +35,12 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngress.PathTest do
     assert classified_conn.private[:codex_pooler_json_parse_error_scope] == :mcp
     assert classified_conn.path_info === original_path_info
 
-    send_resp(classified_conn, 204, "")
+    assert classified_conn.halted
+    assert classified_conn.state == :sent
+    assert classified_conn.status == 405
+    assert classified_conn.resp_body == ""
+    assert get_resp_header(classified_conn, "allow") == ["POST, OPTIONS"]
+    assert %Plug.Conn.Unfetched{} = classified_conn.body_params
   end
 
   test "encoded spellings classify as their decoded runtime and MCP families" do
