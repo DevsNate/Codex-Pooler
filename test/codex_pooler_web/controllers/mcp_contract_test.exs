@@ -60,8 +60,17 @@ defmodule CodexPoolerWeb.McpContractTest do
       assert get_resp_header(conn, "allow") == [@allow]
     end
 
-    test "OPTIONS returns the MCP Allow header without JSON-RPC work" do
-      conn = :options |> build_conn("/mcp") |> CodexPoolerWeb.Router.call([])
+    test "PUT and PATCH return method denial before parsing malformed bodies", %{conn: conn} do
+      for method <- [:put, :patch] do
+        response = conn |> recycle() |> put_req_header("content-type", "application/json") |> dispatch(@endpoint, method, "/mcp", "{")
+        assert response(response, 405) == ""
+        assert get_resp_header(response, "allow") == [@allow]
+        assert match?(%Plug.Conn.Unfetched{}, response.body_params)
+      end
+    end
+
+    test "OPTIONS returns the MCP Allow header without JSON-RPC work", %{conn: conn} do
+      conn = options(conn, "/mcp")
 
       assert response(conn, 204) == ""
       assert get_resp_header(conn, "allow") == [@allow]

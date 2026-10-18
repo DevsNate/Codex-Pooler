@@ -650,9 +650,10 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngressTest do
 
       assert conn.private[:codex_pooler_runtime_ingress_settings] == settings
       assert conn.private[:codex_pooler_json_parse_error_scope] == :mcp
-      refute conn.halted
-
-      Plug.Conn.send_resp(conn, 204, "")
+      assert conn.halted
+      assert conn.status == 405
+      assert get_resp_header(conn, "allow") == ["POST, OPTIONS"]
+      assert match?(%Plug.Conn.Unfetched{}, conn.body_params)
     end
 
     test "ordinary JSON ingress does not attach parser settings or classification" do

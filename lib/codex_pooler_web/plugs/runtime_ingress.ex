@@ -56,6 +56,7 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngress do
     conn
     |> put_json_parser_context(settings, :mcp)
     |> enforce_mcp_firewall(settings)
+    |> respond_to_mcp_method()
     |> authenticate_mcp_request()
     |> admit_mcp_request()
     |> prepare_mcp_body(settings)
@@ -128,6 +129,18 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngress do
         :ok = Firewall.observe_denial(decision, :mcp)
         send_mcp_firewall_error(conn, decision)
     end
+  end
+
+  defp respond_to_mcp_method(%Plug.Conn{halted: true} = conn), do: conn
+  defp respond_to_mcp_method(%Plug.Conn{method: "POST"} = conn), do: conn
+
+  defp respond_to_mcp_method(conn) do
+    status = if conn.method == "OPTIONS", do: 204, else: 405
+
+    conn
+    |> put_resp_header("allow", "POST, OPTIONS")
+    |> send_resp(status, "")
+    |> halt()
   end
 
   defp authenticate_mcp_request(%Plug.Conn{halted: true} = conn), do: conn

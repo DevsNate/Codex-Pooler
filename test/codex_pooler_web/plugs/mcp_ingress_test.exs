@@ -327,6 +327,86 @@ defmodule CodexPoolerWeb.Plugs.McpIngressTest do
     end
   end
 
+  @tag :mcp_methods
+  test "live non-POST methods reject incomplete bodies without authentication, admission or parsing", %{user: user} do
+    setup_runtime_ingress(%OperationalSettings{})
+    _token = enabled_mcp_token!(user)
+    port = start_mcp_method_probe!()
+
+    for enabled <- [true, false] do
+      assert {:ok, _settings} = InstanceSettings.update_system_settings(InstanceSettings.ensure_singleton!(), %{"mcp" => %{"enabled" => enabled}})
+
+      for method <- ~w(GET HEAD DELETE OPTIONS PUT PATCH), encoding <- [nil, "gzip"] do
+        expected_status = if method == "OPTIONS", do: 204, else: 405
+        headers = if encoding, do: [{"content-encoding", encoding}], else: []
+        response = incomplete_mcp_request!(port, method, "/mcp", headers)
+        assert response.status == expected_status
+        assert response.allow == ["POST, OPTIONS"]
+        assert_method_calls!(expected_status, 0, 0, 0)
+        assert {:ok, saturation} = Admission.saturation()
+        assert saturation[RouteClass.mcp()] == %{running: 0, queued: 0}
+      end
+    end
+  end
+
+  @tag :mcp_methods
+  test "non-POST methods bypass a saturated lane while authenticated POST retains admission", %{user: user} do
+    setup_runtime_ingress(%OperationalSettings{
+      bulkheads: Map.put(OperationalSettings.current().bulkheads, RouteClass.mcp(), %{max_concurrency: 1, queue_limit: 0, queue_timeout_ms: 25})
+    })
+
+    raw_token = enabled_mcp_token!(user)
+    port = start_mcp_method_probe!()
+    assert {:ok, held} = Admission.acquire(RouteClass.mcp())
+    on_exit(fn -> Admission.release(held) end)
+
+    for method <- ~w(GET HEAD DELETE OPTIONS PUT PATCH) do
+      expected_status = if method == "OPTIONS", do: 204, else: 405
+      response = incomplete_mcp_request!(port, method, "/mcp", [])
+      assert response.status == expected_status
+      assert response.allow == ["POST, OPTIONS"]
+      assert_method_calls!(expected_status, 0, 0, 0)
+    end
+
+    response = incomplete_mcp_request!(port, "POST", "/mcp", [{"authorization", "Bearer #{raw_token}"}])
+    assert response.status == 503
+    assert_method_calls!(503, 1, 1, 0)
+    Admission.release(held)
+
+    response = Req.post!("http://127.0.0.1:#{port}/mcp", headers: [{"authorization", "Bearer #{raw_token}"}, {"accept", "application/json, text/event-stream"}, {"mcp-protocol-version", @mcp_version}], json: initialize_request(), retry: false)
+    assert response.status == 200
+    assert response.body["result"]["protocolVersion"] == @mcp_version
+    assert_method_calls!(200, 2, 1, 1)
+
+    response = incomplete_mcp_request!(port, "POST", "/mcp", [])
+    assert response.status == 401
+    assert_method_calls!(401, 1, 0, 0)
+
+    assert {:ok, _settings} = InstanceSettings.update_system_settings(InstanceSettings.ensure_singleton!(), %{"mcp" => %{"enabled" => false}})
+    response = incomplete_mcp_request!(port, "POST", "/mcp", [{"authorization", "Bearer #{raw_token}"}])
+    assert response.status == 403
+    assert_method_calls!(403, 1, 0, 0)
+  end
+
+  @tag :mcp_methods
+  @tag :capture_log
+  test "firewall and unsafe paths precede non-POST method responses" do
+    setup_runtime_ingress(%OperationalSettings{firewall_allowlist: ["198.51.100.20"]})
+    port = start_mcp_method_probe!()
+
+    for method <- ~w(GET HEAD DELETE OPTIONS PUT PATCH) do
+      response = incomplete_mcp_request!(port, method, "/mcp", [])
+      assert response.status == 403
+      assert response.allow == []
+      assert_method_calls!(403, 0, 0, 0)
+    end
+
+    response = incomplete_mcp_request!(port, "DELETE", "/mcp%00suffix", [])
+    assert response.status == 400
+    assert response.allow == []
+    assert_method_calls!(400, 0, 0, 0)
+  end
+
   describe "MCP body parser ingress" do
     test "encoded MCP spelling reaches the same pre-parser content-type guard", %{conn: conn, user: user} do
       setup_runtime_ingress(%OperationalSettings{})
@@ -458,6 +538,81 @@ defmodule CodexPoolerWeb.Plugs.McpIngressTest do
 
       Admission.release(held)
     end
+  end
+
+  defp start_mcp_method_probe! do
+    observer = self()
+    traced_calls = [{Plug.Conn, :read_body, 2}, {CodexPooler.Gateway.Admission, :admit_mcp, 1}, {CodexPoolerWeb.Mcp.Authentication, :authenticate, 1}]
+    on_exit(fn -> for mfa <- traced_calls, do: :erlang.trace_pattern(mfa, false, [:local]) end)
+
+    for {module, _function, _arity} = mfa <- traced_calls do
+      Code.ensure_loaded!(module)
+      assert :erlang.trace_pattern(mfa, true, [:local]) == 1
+    end
+
+    probe = fn conn, _opts ->
+      :erlang.trace(self(), true, [:call, :arity, {:tracer, observer}])
+
+      try do
+        result = @endpoint.call(conn, @endpoint.init([]))
+        :erlang.trace(self(), false, [:call])
+        delivered = :erlang.trace_delivered(self())
+
+        receive do
+          {:trace_delivered, _tracee, ^delivered} -> :ok
+        after
+          5_000 -> raise "MCP method trace barrier timed out"
+        end
+
+        send(observer, {:mcp_method_observed, self(), result.status})
+        result
+      after
+        :erlang.trace(self(), false, [:call])
+      end
+    end
+
+    listener = start_supervised!({Bandit, plug: probe, port: 0, ip: {127, 0, 0, 1}, startup_log: false})
+    ownership = capture_public_endpoint_identity!(listener)
+    on_exit(fn -> assert_public_endpoint_identity_released!(ownership) end)
+    {:ok, {_ip, port}} = ThousandIsland.listener_info(listener)
+    port
+  end
+
+  defp incomplete_mcp_request!(port, method, target, headers) do
+    assert {:ok, socket} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false], 2_000)
+    on_exit(fn -> :gen_tcp.close(socket) end)
+
+    try do
+      fields = [{"host", "localhost"}, {"content-type", "application/json"}, {"content-length", "100000000"}, {"connection", "close"}] ++ headers
+      request = [method, " ", target, " HTTP/1.1\r\n", Enum.map(fields, fn {name, value} -> [name, ": ", value, "\r\n"] end), "\r\n"]
+      assert :ok = :gen_tcp.send(socket, request)
+      response = receive_mcp_headers!(socket, "")
+      [status_line | fields] = String.split(response, "\r\n", trim: true)
+      [_version, status | _reason] = String.split(status_line, " ")
+      allow = for field <- fields, String.starts_with?(String.downcase(field), "allow:"), do: field |> String.split(":", parts: 2) |> List.last() |> String.trim()
+      %{status: String.to_integer(status), allow: allow}
+    after
+      :gen_tcp.close(socket)
+    end
+  end
+
+  defp receive_mcp_headers!(socket, buffer) do
+    assert byte_size(buffer) < 32_768
+
+    if String.contains?(buffer, "\r\n\r\n") do
+      buffer |> String.split("\r\n\r\n", parts: 2) |> hd()
+    else
+      assert {:ok, bytes} = :gen_tcp.recv(socket, 0, 2_000)
+      receive_mcp_headers!(socket, buffer <> bytes)
+    end
+  end
+
+  defp assert_method_calls!(status, authentications, admissions, reads) do
+    assert_receive {:mcp_method_observed, request_pid, ^status}, 5_000
+    calls = drain_mcp_calls(request_pid, %{})
+    assert Map.get(calls, {CodexPoolerWeb.Mcp.Authentication, :authenticate, 1}, 0) == authentications
+    assert Map.get(calls, {CodexPooler.Gateway.Admission, :admit_mcp, 1}, 0) == admissions
+    assert Map.get(calls, {Plug.Conn, :read_body, 2}, 0) == reads
   end
 
   defp drain_mcp_calls(request_pid, counts) do
