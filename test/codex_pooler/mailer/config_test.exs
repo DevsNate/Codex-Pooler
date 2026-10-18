@@ -76,6 +76,43 @@ defmodule CodexPooler.Mailer.ConfigTest do
       refute Keyword.has_key?(config, :tls_options)
     end
 
+    test "implicit TLS disables STARTTLS for every accepted requested mode" do
+      for tls <- ["always", "if_available", "never", :always, :if_available, :never] do
+        assert {:ok, %{adapter_config: config}} = MailerConfig.from_settings(smtp_settings(%{ssl: true, tls: tls}))
+        assert config[:tls] == :never
+        assert_secure_tls_options(config[:sockopts], "smtp.example.com")
+        refute Keyword.has_key?(config, :tls_options)
+      end
+    end
+
+    test "existing typed settings with implicit TLS and required STARTTLS remain usable" do
+      changeset = Settings.changeset(Settings.default(), %{smtp: smtp_settings(%{ssl: true, tls: "always", retries: 2})})
+      assert changeset.valid?
+      settings = Ecto.Changeset.apply_changes(changeset)
+      assert settings.smtp.tls == "always"
+      assert {:ok, %{adapter_config: config}} = MailerConfig.from_settings(settings)
+      assert config[:tls] == :never
+      assert_secure_tls_options(config[:sockopts], "smtp.example.com")
+    end
+
+    test "implicit TLS still rejects an invalid requested STARTTLS mode" do
+      assert {:error, %{code: :invalid_mailer_config}} = MailerConfig.from_settings(smtp_settings(%{ssl: true, tls: "invalid"}))
+    end
+
+    test "plain connections preserve every accepted STARTTLS mode" do
+      for tls <- [:always, :if_available, :never], requested <- [tls, Atom.to_string(tls)] do
+        assert {:ok, %{adapter_config: config}} = MailerConfig.from_settings(smtp_settings(%{tls: requested}))
+        assert config[:tls] == tls
+        refute Keyword.has_key?(config, :sockopts)
+
+        if tls == :never do
+          refute Keyword.has_key?(config, :tls_options)
+        else
+          assert_secure_tls_options(config[:tls_options], "smtp.example.com")
+        end
+      end
+    end
+
     test "requires a password when username-based auth is configured" do
       assert {:error, %{code: :invalid_mailer_config, message: message}} =
                MailerConfig.from_settings(%{
@@ -188,6 +225,10 @@ defmodule CodexPooler.Mailer.ConfigTest do
                } = MailerConfig.sanitize_delivery_error(reason)
       end
     end
+  end
+
+  defp smtp_settings(overrides) do
+    Map.merge(%{enabled: true, host: "smtp.example.com", port: 465, username: nil, password: nil, from: "sender@example.com", ssl: false, tls: "always", retries: 0}, overrides)
   end
 
   defp assert_secure_tls_options(options, host) do

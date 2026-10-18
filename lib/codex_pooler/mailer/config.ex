@@ -325,7 +325,8 @@ defmodule CodexPooler.Mailer.Config do
     password = optional_non_blank_string!(smtp_settings, :password, "SMTP password")
     from = require_non_blank_string!(smtp_settings, :from, "SMTP from address")
     ssl = require_boolean!(smtp_settings, :ssl, "SMTP SSL")
-    tls = require_tls_atom!(smtp_settings, :tls)
+    requested_tls = require_tls_atom!(smtp_settings, :tls)
+    tls = if ssl, do: :never, else: requested_tls
     retries = require_non_negative_integer!(smtp_settings, :retries, "SMTP retries")
 
     validate_auth_fields!(username, password)
