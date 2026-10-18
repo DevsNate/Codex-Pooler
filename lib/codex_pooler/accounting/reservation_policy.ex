@@ -10,6 +10,8 @@ defmodule CodexPooler.Accounting.ReservationPolicy do
   alias CodexPooler.Catalog.Model
   alias CodexPooler.Repo
 
+  @max_storage_tokens 9_223_372_036_854_775_807
+
   @spec policy_for_update(term(), String.t() | nil, struct() | nil) :: struct() | nil
   def policy_for_update(api_key, requested_model, candidate_policy \\ nil) do
     lock_candidate_policy(api_key, requested_model, candidate_policy) ||
@@ -24,10 +26,34 @@ defmodule CodexPooler.Accounting.ReservationPolicy do
   @spec enforce_reservation_limits(term(), struct() | nil, map(), DateTime.t() | nil) ::
           :ok | {:error, Metadata.accounting_error()}
   def enforce_reservation_limits(api_key, policy, estimate, timestamp \\ nil) do
-    with :ok <- enforce_active_request_limit(api_key) do
+    with :ok <- enforce_token_storage_range(estimate),
+         :ok <- enforce_active_request_limit(api_key) do
       enforce_policy_limits(api_key, policy, estimate, timestamp)
     end
   end
+
+  # The provider cap and trusted precomputed estimates must fit every persisted
+  # token column, including their sum, even when the key has no token policy.
+  defp enforce_token_storage_range(estimate) do
+    if Enum.all?([:input_tokens, :cached_input_tokens, :output_tokens, :reasoning_tokens, :total_tokens], fn field ->
+         storage_tokens?(Map.get(estimate, field, 0))
+       end) do
+      :ok
+    else
+      {:error,
+       :invalid_request
+       |> Metadata.accounting_error("request token estimate exceeds the supported accounting range")
+       |> Map.put(:status, 400)}
+    end
+  end
+
+  defp storage_tokens?(tokens) when is_integer(tokens), do: tokens >= 0 and tokens <= @max_storage_tokens
+
+  # Policy callers also use Decimal estimates; preserve that comparison contract.
+  defp storage_tokens?(%Decimal{coef: coefficient} = tokens) when is_integer(coefficient),
+    do: Decimal.compare(tokens, 0) != :lt and Decimal.compare(tokens, @max_storage_tokens) != :gt
+
+  defp storage_tokens?(_tokens), do: false
 
   # Caller holds the per-key reservation advisory mutex through insertion.
   # The cap is independent of the effective model binding and token windows.

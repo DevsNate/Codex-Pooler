@@ -75,6 +75,7 @@ defmodule CodexPooler.Accounting.Metadata do
   @type accounting_error :: %{
           required(:code) => atom(),
           required(:message) => String.t(),
+          optional(:status) => pos_integer(),
           optional(:limit_scope) => :window | :request,
           optional(:retry_after_seconds) => pos_integer(),
           optional(:resend_disposition) => atom(),
