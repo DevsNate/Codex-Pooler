@@ -305,7 +305,11 @@ const links = [
       if ((event.target as HTMLElement).closest("a")) setOpen(false);
     });
     document.addEventListener("keydown", (event) => {
-      if (event.key === "Escape") setOpen(false);
+      if (event.key === "Escape" && !menu.hidden) {
+        const restoreFocus = menu.contains(document.activeElement);
+        setOpen(false);
+        if (restoreFocus) button.focus();
+      }
     });
     window.matchMedia("(min-width: 901px)").addEventListener("change", (event) => {
       if (event.matches) setOpen(false);

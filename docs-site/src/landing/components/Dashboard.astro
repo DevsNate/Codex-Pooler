@@ -375,6 +375,10 @@ const full = await Promise.all(tabs.map((tab) => getImage({ src: tab.image, form
       tabs.forEach((tab) => tab.querySelector(".tab-progress")!.classList.remove("run"));
     };
 
+    tour.addEventListener("focusin", stopAuto);
+    tour.addEventListener("pointerenter", stopAuto);
+    tour.addEventListener("pointerdown", stopAuto);
+
     tabs.forEach((tab, index) => {
       tab.addEventListener("click", () => {
         stopAuto();

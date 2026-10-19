@@ -16,5 +16,8 @@ if (!("IntersectionObserver" in window) || reduceMotion) {
     },
     { rootMargin: "0px 0px -8% 0px", threshold: 0.12 },
   );
-  items.forEach((item) => observer.observe(item));
+  items.forEach((item) => {
+    observer.observe(item);
+    item.classList.add("reveal-ready");
+  });
 }

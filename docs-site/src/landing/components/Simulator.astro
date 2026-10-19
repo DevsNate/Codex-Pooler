@@ -1645,9 +1645,11 @@ const poolNote = (ids: string[]) => `Accounts ${ids.map((id) => id.toUpperCase()
     if (reduceMotion) return;
 
     let shown = false;
+    let visible = false;
     new IntersectionObserver(
       ([entry]) => {
-        setRunning(entry.isIntersecting && !document.hidden);
+        visible = entry.isIntersecting;
+        setRunning(visible && !document.hidden);
         if (entry.isIntersecting && entry.intersectionRatio > 0.5 && !shown) {
           shown = true;
           // Start the story from the beginning the first time it is seen.
@@ -1658,6 +1660,6 @@ const poolNote = (ids: string[]) => `Accounts ${ids.map((id) => id.toUpperCase()
       },
       { threshold: [0, 0.5] },
     ).observe(sim);
-    document.addEventListener("visibilitychange", () => setRunning(!document.hidden && sim.getBoundingClientRect().top < innerHeight));
+    document.addEventListener("visibilitychange", () => setRunning(visible && !document.hidden));
   }
 </script>

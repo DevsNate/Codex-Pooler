@@ -370,20 +370,20 @@ summary {
 /* reveal on scroll: content is visible by default and only animates
    once the script has confirmed it can observe the element. */
 
-.js [data-reveal] {
+[data-reveal].reveal-ready {
   opacity: 0;
   transform: translateY(26px);
   transition: opacity 0.8s cubic-bezier(0.2, 0.7, 0.2, 1), transform 0.8s cubic-bezier(0.2, 0.7, 0.2, 1);
   transition-delay: var(--delay, 0s);
 }
 
-.js [data-reveal].is-in {
+[data-reveal].reveal-ready.is-in {
   opacity: 1;
   transform: none;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .js [data-reveal] {
+  [data-reveal].reveal-ready {
     opacity: 1;
     transform: none;
     transition: none;
