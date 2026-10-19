@@ -985,6 +985,7 @@ const accounts = [
     const visibleAccount = (account: Account) => getComputedStyle(account.el).display !== "none";
     const hits = new Map<string, number[]>();
     const links = new Map<string, SVGPathElement>();
+    const lengths = new Map<SVGPathElement, number>();
 
     interface Packet {
       legs: SVGPathElement[];
@@ -999,8 +1000,7 @@ const accounts = [
 
     /* geometry ---------------------------------------------------- */
 
-    const box = (el: Element) => {
-      const base = stage.getBoundingClientRect();
+    const box = (el: Element, base: DOMRect) => {
       const r = el.getBoundingClientRect();
       return { l: r.left - base.left, r: r.right - base.left, cy: r.top - base.top + r.height / 2 };
     };
@@ -1022,27 +1022,35 @@ const accounts = [
 
     function layout() {
       const base = stage.getBoundingClientRect();
-      svg.setAttribute("viewBox", `0 0 ${base.width} ${base.height}`);
+      const geometry: { key: string; d: string; poolId?: string }[] = [];
       for (const client of clients) {
-        const c = box(client);
-        const p = box(pools.get(client.dataset.pool!)!);
-        link(`in:${client.dataset.client}`).setAttribute("d", curve(c.r, c.cy, p.l, p.cy));
+        const c = box(client, base);
+        const p = box(pools.get(client.dataset.pool!)!, base);
+        geometry.push({ key: `in:${client.dataset.client}`, d: curve(c.r, c.cy, p.l, p.cy) });
       }
       for (const [poolId, poolEl] of pools) {
-        const p = box(poolEl);
+        const p = box(poolEl, base);
         for (const accountId of poolEl.dataset.accounts!.split(",")) {
           const account = accounts.get(accountId)!;
-          const path = link(`out:${poolId}:${accountId}`);
-          path.classList.add("out");
-          path.style.setProperty("--tone", TONES[poolId]);
-          if (!visibleAccount(account)) {
-            path.setAttribute("d", "");
-            continue;
+          let d = "";
+          if (visibleAccount(account)) {
+            const a = box(account.el, base);
+            d = curve(p.r, p.cy, a.l, a.cy);
           }
-          const a = box(account.el);
-          path.setAttribute("d", curve(p.r, p.cy, a.l, a.cy));
+          geometry.push({ key: `out:${poolId}:${accountId}`, d, poolId });
         }
       }
+      svg.setAttribute("viewBox", `0 0 ${base.width} ${base.height}`);
+      for (const { key, d, poolId } of geometry) {
+        const path = link(key);
+        path.setAttribute("d", d);
+        if (poolId) {
+          path.classList.add("out");
+          path.style.setProperty("--tone", TONES[poolId]);
+        }
+      }
+      // Path geometry changes only during layout; measure after all SVG writes.
+      for (const path of links.values()) lengths.set(path, path.getTotalLength());
     }
 
     /* events -------------------------------------------------------- */
@@ -1198,15 +1206,19 @@ const accounts = [
         emit(now);
         nextEmit = now + 360 + Math.random() * 400;
       }
-      for (let i = packets.length - 1; i >= 0; i -= 1) {
-        const packet = packets[i];
+      // Finish geometry reads before moving any dots or updating account styles.
+      const positions = packets.map((packet) => {
         const path = packet.legs[packet.leg];
         const duration = packet.leg === 0 ? 680 : 540;
         const t = Math.min(1, (now - packet.start) / duration);
         const e = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
-        const length = path.getTotalLength();
-        if (length > 0) {
-          const p = path.getPointAtLength(length * e);
+        const length = lengths.get(path) ?? 0;
+        return { t, point: length > 0 ? path.getPointAtLength(length * e) : null };
+      });
+      for (let i = packets.length - 1; i >= 0; i -= 1) {
+        const packet = packets[i];
+        const { t, point: p } = positions[i];
+        if (p) {
           packet.dot.setAttribute("cx", String(p.x));
           packet.dot.setAttribute("cy", String(p.y));
         }
