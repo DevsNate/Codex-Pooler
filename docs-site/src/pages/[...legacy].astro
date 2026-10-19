@@ -1,0 +1,41 @@
+---
+import type { GetStaticPaths } from "astro";
+import { getCollection } from "astro:content";
+import { legacyRedirects } from "../legacyRedirects.mjs";
+
+export const getStaticPaths = (async () => {
+  const entries = await getCollection("docs");
+  return Object.entries(legacyRedirects(entries.map((entry) => entry.id))).map(([source, target]) => ({
+    params: { legacy: source.slice(1, -1) },
+    props: { target },
+  }));
+}) satisfies GetStaticPaths;
+
+interface Props {
+  readonly target: string;
+}
+
+const { target } = Astro.props;
+const canonical = new URL(target, Astro.site).href;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Documentation moved</title>
+    <meta http-equiv="refresh" content={`0;url=${target}`} />
+    <meta name="robots" content="noindex,follow" />
+    <link rel="canonical" href={canonical} />
+    <script is:inline define:vars={{ target }}>
+      if (window.location.search || window.location.hash) {
+        document.querySelector('meta[http-equiv="refresh"]')?.remove();
+        window.location.replace(target + window.location.search + window.location.hash);
+      }
+    </script>
+  </head>
+  <body>
+    <a href={target}>Continue to the documentation</a>
+  </body>
+</html>

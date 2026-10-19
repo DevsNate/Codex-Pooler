@@ -5,12 +5,15 @@
     "dev": "astro dev",
     "build": "astro build",
     "preview": "astro preview",
-    "check": "astro check && npm run check:dashboard && npm run check:ingress-docs && npm run check:llms && npm run check:promql",
+    "check": "astro check && npm run test:site && npm run check:dashboard && npm run check:ingress-docs && npm run check:llms && npm run check:promql",
     "check:promql": "node scripts/check-promql-highlighting.mjs",
     "build:dashboard": "node dashboards/build.mjs",
     "check:dashboard": "node dashboards/build.mjs --check",
     "check:ingress-docs": "node scripts/check-ingress-docs-contract.mjs",
-    "check:llms": "node scripts/check-llms-inventory.mjs"
+    "check:llms": "node scripts/check-llms-inventory.mjs",
+    "check:seo": "node scripts/check-seo.mjs",
+    "test:seo": "node --test scripts/check-seo.test.mjs",
+    "test:site": "node --test scripts/*.test.mjs"
   },
   "dependencies": {
     "@astrojs/sitemap": "3.7.4",

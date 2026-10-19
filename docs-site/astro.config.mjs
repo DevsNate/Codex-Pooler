@@ -5,6 +5,7 @@ import starlightPageActions from "starlight-page-actions";
 import sitemap from "@astrojs/sitemap";
 import docsLinks from "./plugins/docs-links.mjs";
 import docsImages from "./plugins/docs-images.mjs";
+import { DOCS_REDIRECTS, isIndexablePage } from "./src/legacyRedirects.mjs";
 
 // The landing page is the site root (src/pages/index.astro) and the docs are
 // served under /docs (see src/content.config.ts).
@@ -30,14 +31,10 @@ const removePrivateMarkdownAssets = () => ({
 
 export default defineConfig({
   site: siteOrigin,
-  redirects: {
-    "/docs/clients/kilo/": "/docs/clients/kilo-code/",
-    "/docs/clients/codex-cli/": "/docs/clients/codex-cli-desktop/",
-    "/docs/reference/endpoint-routing/": "/docs/reference/runtime-routes/",
-  },
+  redirects: DOCS_REDIRECTS,
   integrations: [
-    // Starlight's default sitemap, minus a noindex page kept only for old bookmarks and their anchors.
-    sitemap({ filter: (page) => !page.endsWith("/docs/operators/monitoring/") }),
+    // Only canonical content belongs in the sitemap, never legacy redirect stubs.
+    sitemap({ filter: isIndexablePage }),
     starlight({
       title: "Codex Pooler",
       description: siteDescription,

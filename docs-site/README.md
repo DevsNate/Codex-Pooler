@@ -14,8 +14,9 @@ From the repository root, `make dev` also reinstalls this project's locked depen
 ## Check and build
 
 ```sh
-npm run check    # astro check and the docs contract checks
+npm run check    # astro check, website regression tests and docs contract checks
 npm run build    # static site in dist/
+npm run check:seo # audit every built page, sitemap, canonical and internal link
 npm run preview  # serve the build locally
 ```
 
@@ -33,7 +34,9 @@ npm run preview  # serve the build locally
 | `public/` | Files served at the site root: images (the docs banners are 1440px WebP copies of the README banners), `llms.txt`, `answers.md`, `pricing.md`, `robots.txt`, the landing page's social card `og.jpg`, the monitoring dashboards, and the landing page's logos and icons |
 | `scripts/`, `dashboards/` | Checks run by `npm run check`, and the dashboard build |
 
-The 404 page (`src/content/docs/404.mdx`) serves the whole site and forwards links from before the docs moved under `/docs` to their new address.
+Known documentation links from before the move under `/docs` get a static redirect page from `src/pages/[...legacy].astro`. The paths come from the docs collection, and renamed guides point directly to their final address. GitHub Pages serves these as HTTP 200 pages with an immediate HTML refresh, a canonical destination and a fallback link; they do not depend on JavaScript or return a 404. Unknown paths keep the site-wide 404 page (`src/content/docs/404.mdx`). Permanent HTTP redirects at the hosting edge remain preferable when available.
+
+The post-build SEO check verifies sitemap coverage, canonical URLs, index/noindex separation, unique titles and descriptions, headings, image alt attributes, social-card files, structured data and internal links and anchors. It runs before the Pages artifact can be uploaded. It checks the generated site; live redirects, edge filtering, Google indexing and real-user Core Web Vitals require separate production checks.
 
 The landing page carries one structured-data graph (Organization, WebSite, SoftwareApplication) that every docs page points at by `@id`. The docs use the same variable Roboto Condensed WOFF2 files as the landing page, from `@fontsource-variable/roboto-condensed`.
 
