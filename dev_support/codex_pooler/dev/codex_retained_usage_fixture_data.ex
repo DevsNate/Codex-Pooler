@@ -3,6 +3,7 @@ defmodule CodexPooler.Dev.CodexRetainedUsageFixtureData do
   import Ecto.Query
   alias CodexPooler.{Access, Accounts, Repo}
   alias CodexPooler.Accounting.{Attempt, LedgerEntry, Request}
+  alias CodexPooler.Accounting.RequestLogs.DebugProjection.DownstreamDelivery
   alias CodexPooler.Dev.CodexCompactionSmokeFixture.{Journal, Provisioner}
   alias CodexPooler.Dev.{CodexRetainedUsageFixture, CodexRetainedUsageFixtureUI, LocalTarget, QaBackgroundWorkers}
   alias CodexPooler.Gateway.Payloads.WebsocketTurnIdentity
@@ -144,7 +145,22 @@ defmodule CodexPooler.Dev.CodexRetainedUsageFixtureData do
   defp row(turn, request, attempt, entries) do
     settlement = List.first(entries) || %{}
     attempt = attempt || %{}
+
     %{requestId: request.id, attemptId: Map.get(attempt, :id), turnId: turn.id, replayGeneration: Map.get(attempt, :replay_generation), ownerInstance: get_in(request.request_metadata, ["websocket_owner_forwarding", "owner_instance_id"]), proxyInstance: get_in(request.request_metadata, ["websocket_owner_forwarding", "proxy_instance_id"]), executionInstance: Map.get(attempt, :owner_instance_id), executionBootId: Map.get(attempt, :owner_instance_boot_id), executionId: Map.get(attempt, :owner_execution_id), requestStatus: request.status, attemptStatus: Map.get(attempt, :status), turnStatus: turn.status, errorCode: request.last_error_code, usageSource: Map.get(settlement, :usage_status, "usage_unknown"), inputTokens: measured(settlement, :input_tokens), outputTokens: measured(settlement, :output_tokens), totalTokens: measured(settlement, :total_tokens), servingMode: get_in(request.request_metadata, ["routing", "model_serving_mode"]), effectiveSettlementCount: length(entries), settlementId: Map.get(settlement, :id)}
+    |> Map.merge(delivery_fields(request, attempt))
+  end
+
+  defp delivery_fields(request, attempt) do
+    receipt = DownstreamDelivery.build(Map.get(attempt, :response_metadata)) || %{}
+    epoch = get_in(request.request_metadata, ["websocket_owner_forwarding", "downstream_epoch"])
+
+    %{
+      downstreamDeliveryOutcome: Map.get(receipt, :outcome),
+      downstreamTerminalClass: Map.get(receipt, :terminal_class),
+      downstreamFramesAfterVisible: Map.get(receipt, :frames_after_visible),
+      downstreamWriteFailure: Map.get(receipt, :write_failure),
+      downstreamEpoch: if(is_integer(epoch) and epoch > 0, do: epoch)
+    }
   end
 
   defp measured(%{usage_status: "usage_known"} = settlement, field), do: Map.get(settlement, field)

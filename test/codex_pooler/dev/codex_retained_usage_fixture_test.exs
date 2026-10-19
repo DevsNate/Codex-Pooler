@@ -111,6 +111,36 @@ defmodule CodexPooler.Dev.CodexRetainedUsageFixtureQueryTest do
     render_async(view, 15_000)
   end
 
+  test "snapshot projects persisted delivery and request epoch without exposing other metadata" do
+    setup = AccountingTestSupport.accounting_setup()
+    {:ok, session} = Websocket.start_codex_session(setup.auth, %{accepted_turn_state: Ecto.UUID.generate()})
+    {:ok, %{request: request}} = Accounting.reserve(setup.auth, setup.model, %{}, %{requested_model: setup.model.exposed_model_id, transport: "websocket", endpoint: "/backend-api/codex/responses", correlation_id: Ecto.UUID.generate()})
+    options = RequestOptions.for_websocket(%{}) |> RequestOptions.put_continuity(semantic_turn_key: <<1::256>>)
+    {:ok, _turn} = Websocket.start_codex_turn(session, request, options)
+    {:ok, attempt} = Accounting.create_attempt(request, setup.assignment, %{transport: "websocket"})
+    fields = [:downstreamDeliveryOutcome, :downstreamTerminalClass, :downstreamFramesAfterVisible, :downstreamWriteFailure, :downstreamEpoch]
+    [empty] = CodexRetainedUsageFixtureData.rows(session.id)
+    assert Enum.all?(fields, &is_nil(Map.fetch!(empty, &1)))
+
+    binding = %{"enabled" => true, "owner_instance_id" => "owner@localhost", "proxy_instance_id" => "proxy@localhost", "downstream_epoch" => 2}
+    receipt = %{"outcome" => "delivered", "terminal_class" => "response.completed", "frames_after_visible" => 10, "transport" => "websocket", "completed_item_digests" => ["synthetic-not-exported"]}
+    request |> Ecto.Changeset.change(request_metadata: %{"websocket_owner_forwarding" => binding}) |> Repo.update!()
+    attempt |> Ecto.Changeset.change(response_metadata: %{"downstream_delivery" => receipt, "unrelated" => "synthetic-not-exported"}) |> Repo.update!()
+    [delivered] = CodexRetainedUsageFixtureData.rows(session.id)
+    assert Map.take(delivered, fields) == %{downstreamDeliveryOutcome: "delivered", downstreamTerminalClass: "response.completed", downstreamFramesAfterVisible: 10, downstreamWriteFailure: nil, downstreamEpoch: 2}
+    assert {delivered.ownerInstance, delivered.proxyInstance} == {"owner@localhost", "proxy@localhost"}
+    refute "synthetic-not-exported" in Map.values(delivered)
+
+    attempt |> Ecto.Changeset.change(response_metadata: %{"downstream_delivery" => Map.put(receipt, "write_failure", "closed")}) |> Repo.update!()
+    [failed_write] = CodexRetainedUsageFixtureData.rows(session.id)
+    assert failed_write.downstreamWriteFailure == "closed"
+
+    request |> Ecto.Changeset.change(request_metadata: %{"websocket_owner_forwarding" => Map.put(binding, "downstream_epoch", "untrusted")}) |> Repo.update!()
+    attempt |> Ecto.Changeset.change(response_metadata: %{"downstream_delivery" => Map.put(receipt, "write_failure", "untrusted")}) |> Repo.update!()
+    [invalid] = CodexRetainedUsageFixtureData.rows(session.id)
+    assert Enum.all?(fields, &is_nil(Map.fetch!(invalid, &1)))
+  end
+
   test "real unknown settlement estimates remain null while a measured zero remains known" do
     setup = AccountingTestSupport.accounting_setup()
     {:ok, session} = Websocket.start_codex_session(setup.auth, %{accepted_turn_state: Ecto.UUID.generate()})

@@ -224,6 +224,71 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.StalledReaderReceiptTest 
     end
   end
 
+  # A small turn fits the connection buffers and receives a delivered receipt
+  # before the passive client decodes it. Reading afterwards proves those
+  # bytes remain available. Backdating completion then exercises the retry
+  # window independently; this does not reproduce a client watchdog or loss.
+  @tag repro: :retry_window
+  @tag slow: "a real refused resend plus the receipt wait"
+  test "a small turn records delivery before the client reads and rejects an identical resend after expiry" do
+    %{setup: setup, upstream: upstream, port: port, turn_state: turn_state, raw_payload: raw_payload} = small_scenario!(:one)
+
+    # Delay application reads until after the receipt without closing or
+    # filling the socket buffers.
+    {conn, websocket, ref} = public_websocket_connect!(port, setup, turn_state)
+    {:ok, conn} = Mint.HTTP.set_mode(conn, :passive)
+    {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, raw_payload)
+
+    %Request{id: request_id} = await_request!(setup.pool.id, System.monotonic_time(:millisecond) + @timeout_ms)
+    receipt = await_receipt!(request_id, System.monotonic_time(:millisecond) + @timeout_ms)
+    _settled = await_settled!(request_id, System.monotonic_time(:millisecond) + @timeout_ms)
+
+    # The boundary: a delivered terminal while this client decoded no frame.
+    assert %{"outcome" => "delivered", "terminal_class" => "response.completed", "highest_frame_class" => "terminal", "frames_after_visible" => frames} = receipt
+    assert frames > 0
+    refute Map.has_key?(receipt, "write_failure")
+
+    # The frames were written into the connection the whole time: reading only
+    # now still yields exactly the push the receipt counted.
+    {_conn, received} = read_text_frames!(conn, websocket, ref, :terminal)
+    assert received |> Enum.reject(&StreamProtocol.internal_control_event?/1) |> length() == frames
+
+    # Move completion outside the ordinary retry window without running a
+    # real client timeout. The identical resend must remain a duplicate.
+    _completed_at = move_completion_back!(request_id, 305)
+    refused = send_and_receive_terminal!(port, setup, turn_state, raw_payload)
+
+    assert %{"type" => "error", "error" => %{"code" => "duplicate_turn"}} = refused
+    assert [%Request{id: ^request_id, status: "succeeded"}] = pool_requests(setup.pool.id)
+    assert FakeUpstream.count(upstream) == 1
+    assert Repo.all(RequestClientRetryLink) == []
+  end
+
+  # With an unread delivered predecessor still inside the ordinary window,
+  # the identical resend is admitted as a successor and dispatched again.
+  # This compares retry admission, not recovery of the previous response.
+  @tag repro: :retry_window
+  @tag slow: "two provider dispatches and a successor settlement"
+  test "the identical resend of a delivered-but-unread turn is served inside the ordinary retry window" do
+    %{setup: setup, upstream: upstream, port: port, turn_state: turn_state, raw_payload: raw_payload} = small_scenario!(:two)
+
+    {conn, websocket, ref} = public_websocket_connect!(port, setup, turn_state)
+    {:ok, conn} = Mint.HTTP.set_mode(conn, :passive)
+    {_conn, _websocket} = public_websocket_send_text!(conn, websocket, ref, raw_payload)
+
+    %Request{id: request_id} = await_request!(setup.pool.id, System.monotonic_time(:millisecond) + @timeout_ms)
+    receipt = await_receipt!(request_id, System.monotonic_time(:millisecond) + @timeout_ms)
+    _settled = await_settled!(request_id, System.monotonic_time(:millisecond) + @timeout_ms)
+    assert %{"outcome" => "delivered", "terminal_class" => "response.completed"} = receipt
+
+    served = send_and_receive_terminal!(port, setup, turn_state, raw_payload)
+    await_all_settled!(setup.pool.id, System.monotonic_time(:millisecond) + @timeout_ms)
+
+    assert %{"type" => "response.completed"} = served
+    assert [%Request{id: ^request_id, status: "succeeded"}, %Request{status: "succeeded"}] = pool_requests(setup.pool.id)
+    assert FakeUpstream.count(upstream) == 2
+  end
+
   defp scenario!(forwarding, opts \\ []) do
     CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled, false)
     Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, forwarding)
@@ -344,6 +409,74 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.StalledReaderReceiptTest 
       assert Repo.all(from(l in LedgerEntry, where: l.request_id == ^id and l.amount_status == "recorded", select: l.entry_kind)) |> Enum.frequencies() ==
                %{"reservation" => 1, "settlement" => 1, "release" => 1}
     end
+  end
+
+  # Keep the response small enough for the passive loopback client's buffers.
+  defp small_scenario!(responses) do
+    CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled, false)
+    Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, true)
+
+    upstream =
+      start_upstream(
+        FakeUpstream.strict_sequence(
+          for response_id <- Enum.take(["resp_small_delivered_1", "resp_small_delivered_2"], if(responses == :one, do: 1, else: 2)),
+              do: native_request(FakeUpstream.websocket_text_frames(small_stream_frames(response_id)))
+        )
+      )
+
+    setup = gateway_setup(upstream)
+    _revision = set_model_serving_mode!(model_serving_scope(), setup, "lite")
+    raw_payload = CodexPooler.JSON.encode!(native_turn_payload(Ecto.UUID.generate(), setup.model.exposed_model_id))
+    port = start_plain_endpoint!()
+    %{setup: setup, upstream: upstream, port: port, turn_state: Ecto.UUID.generate(), raw_payload: raw_payload}
+  end
+
+  # The shared helper's listener with production buffers and the production send
+  # timeout: nothing here is shortened for a failure, because the turn is small
+  # enough that no write has to fail.
+  defp start_plain_endpoint! do
+    :ok = WebsocketCleanupFence.install!()
+
+    {:ok, server} =
+      Bandit.start_link(
+        plug: CodexPoolerWeb.Endpoint,
+        port: 0,
+        ip: {127, 0, 0, 1},
+        startup_log: false
+      )
+
+    on_exit(fn ->
+      try do
+        ThousandIsland.stop(server)
+      catch
+        :exit, _reason -> :ok
+      end
+    end)
+
+    :ok = WebsocketCleanupFence.install!(server: server)
+    {:ok, {_ip, port}} = ThousandIsland.listener_info(server)
+    port
+  end
+
+  defp small_stream_frames(response_id) do
+    item_id = "msg_" <> response_id
+    text = "small delivered text"
+    item = %{"id" => item_id, "type" => "message", "role" => "assistant", "status" => "completed", "content" => [%{"type" => "output_text", "text" => text, "annotations" => []}]}
+
+    Enum.map(
+      [
+        %{"type" => "response.created", "response" => %{"id" => response_id, "status" => "in_progress", "output" => []}},
+        %{"type" => "response.in_progress", "response" => %{"id" => response_id, "status" => "in_progress", "output" => []}},
+        %{"type" => "response.output_item.added", "output_index" => 0, "item" => %{"id" => item_id, "type" => "message", "role" => "assistant", "status" => "in_progress", "content" => []}},
+        %{"type" => "response.content_part.added", "item_id" => item_id, "output_index" => 0, "content_index" => 0, "part" => %{"type" => "output_text", "text" => "", "annotations" => []}},
+        %{"type" => "response.output_text.delta", "item_id" => item_id, "output_index" => 0, "content_index" => 0, "delta" => text},
+        %{"type" => "response.output_text.done", "item_id" => item_id, "output_index" => 0, "content_index" => 0, "text" => text},
+        %{"type" => "response.content_part.done", "item_id" => item_id, "output_index" => 0, "content_index" => 0, "part" => %{"type" => "output_text", "text" => text, "annotations" => []}},
+        %{"type" => "response.output_item.done", "output_index" => 0, "item" => item},
+        %{"type" => "response.completed", "response" => %{"id" => response_id, "status" => "completed", "output" => [item], "usage" => %{"input_tokens" => 3, "output_tokens" => 2, "total_tokens" => 5}}}
+      ],
+      &CodexPooler.JSON.encode!/1
+    )
   end
 
   defp native_request(respond) do
