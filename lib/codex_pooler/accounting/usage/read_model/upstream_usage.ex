@@ -271,7 +271,7 @@ defmodule CodexPooler.Accounting.UsageReadModel.UpstreamUsage do
 
     # Presentation precedence for the representative usage account, not quota or pricing entitlement.
     cond do
-      plan in ~w(team business ent26 enterprise enterprise-cbp-automation enterprise-cbp-usage-based self-serve-business-prolite self-serve-business-usage-based edu edu-plus edu-pro hc education) -> 4
+      plan in ~w(team business ent26 enterprise enterprise-cbp-automation enterprise-cbp-usage-based self-serve-business-prolite self-serve-business-usage-based edu edu-plus edu-pro hc education sci sci-plus) -> 4
       plan in ~w(pro prolite promax chatgpt-pro) -> 3
       plan in ~w(plus chatgpt-plus) -> 2
       plan in ~w(free go) -> 1

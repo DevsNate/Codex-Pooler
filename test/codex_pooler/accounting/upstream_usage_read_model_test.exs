@@ -183,9 +183,9 @@ defmodule CodexPooler.Accounting.UpstreamUsageReadModelTest do
   end
 
   test "representative usage recognizes workspace and consumer plan SKUs without substring matching" do
-    workspace_plans = ~w(team business ent26 enterprise enterprise_cbp_automation enterprise_cbp_usage_based self_serve_business_prolite self_serve_business_usage_based edu edu_plus edu_pro hc education)
+    workspace_plans = ~w(team business ent26 enterprise enterprise_cbp_automation enterprise_cbp_usage_based self_serve_business_prolite self_serve_business_usage_based edu edu_plus edu_pro hc education sci sci_plus)
 
-    pairs = Enum.map(workspace_plans, &{&1, "promax"}) ++ Enum.map(~w(pro prolite promax), &{&1, "plus"}) ++ [{"plus", "go"}, {"go", "unknown"}, {"free", "enterprise_preview_unknown"}]
+    pairs = Enum.map(workspace_plans, &{&1, "promax"}) ++ Enum.map(~w(pro prolite promax), &{&1, "plus"}) ++ [{"plus", "go"}, {"go", "unknown"}, {"free", "enterprise_preview_unknown"}, {"free", "sci_preview_unknown"}, {"free", "sci_plus_preview_unknown"}]
 
     for {preferred, other} <- pairs do
       pool = pool_fixture()
