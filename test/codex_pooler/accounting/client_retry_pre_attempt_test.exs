@@ -244,6 +244,61 @@ defmodule CodexPooler.Accounting.ClientRetryPreAttemptTest do
     )
   end
 
+  for admission <- [:owner, :request_claim, :turn_claim] do
+    @tag admission: admission
+    test "#{admission}: a released pre-attempt disconnect admits one successor and fences a late executor", %{admission: admission} do
+      fixture = disconnect_predecessor_fixture(admission)
+      before = Repo.all(from entry in LedgerEntry, where: entry.request_id == ^fixture.request.id)
+      assert {:ok, _successor} = admit_disconnect(fixture, admission)
+      assert {:error, _reason} = admit_disconnect(fixture, admission)
+      assert {:error, %{code: :request_already_finalized}} = Accounting.create_attempt(fixture.request, fixture.setup.assignment)
+      refute Repo.exists?(from attempt in Attempt, where: attempt.request_id == ^fixture.request.id)
+      assert Repo.all(from entry in LedgerEntry, where: entry.request_id == ^fixture.request.id) == before
+      assert Repo.get!(Request, fixture.request.id) == fixture.request
+    end
+
+    for mutation <- [:active, :visible, :attempt, :release, :phase, :settlement, :expired, :future, :witness, :payload, :epoch, :anchor, :endpoint, :release_amount, :release_source, :release_reason, :release_status, :request_transport, :session] do
+      @tag admission: admission, mutation: mutation
+      test "#{admission}: pre-attempt disconnect rejects #{mutation}", context do
+        assert_disconnect_rejected(context.admission, context.mutation)
+      end
+    end
+  end
+
+  defp assert_disconnect_rejected(admission, mutation) do
+    fixture = disconnect_predecessor_fixture(admission) |> mutate(mutation)
+    count = Repo.aggregate(Request, :count)
+    assert {:error, _reason} = admit_disconnect(fixture, admission), "accepted #{mutation}"
+    assert Repo.aggregate(Request, :count) == count
+    refute Repo.exists?(from link in RequestClientRetryLink, where: link.predecessor_request_id == ^fixture.request.id)
+  end
+
+  # Predicate fixtures deliberately vary the stored proof; the runtime sibling
+  # test obtains the positive proof from an actual socket interruption.
+  defp disconnect_predecessor_fixture(admission) do
+    fixture = predecessor_fixture(%{last_error_code: "client_disconnected"})
+    turn = Repo.update!(Ecto.Changeset.change(fixture.turn, error_code: "client_disconnected"))
+    prefix = if admission == :turn_claim, do: "codex-turn:", else: "codex-request:"
+    correlation_id = prefix <> Base.url_encode64(fixture.opts.semantic_turn_digest, padding: false)
+    request = Repo.update!(Ecto.Changeset.change(fixture.request, correlation_id: correlation_id, request_metadata: %{}))
+    %{fixture | request: request, turn: turn}
+  end
+
+  defp admit_disconnect(fixture, :owner), do: claim(fixture)
+
+  defp admit_disconnect(fixture, _claim_domain) do
+    witness = ClientRetry.original_witness!(fixture.opts.replay_claim_digest, fixture.opts.runtime_revocation_epoch)
+
+    Accounting.claim_websocket_turn(fixture.setup.auth, fixture.setup.model, %{
+      correlation_id: fixture.request.correlation_id,
+      endpoint: fixture.opts.endpoint,
+      codex_session: fixture.opts.codex_session,
+      semantic_turn_digest: fixture.opts.semantic_turn_digest,
+      native_client_retry_witness: witness,
+      anchor_present?: Map.get(fixture.opts, :anchor_present?, false)
+    })
+  end
+
   defp claimed_predecessor_fixture do
     fixture = predecessor_fixture()
     Repo.delete!(fixture.turn)
@@ -449,6 +504,35 @@ defmodule CodexPooler.Accounting.ClientRetryPreAttemptTest do
     release = Repo.get_by!(LedgerEntry, request_id: fixture.request.id, entry_kind: "release")
     Repo.update!(Ecto.Changeset.change(release, entry_kind: "settlement"))
     fixture
+  end
+
+  defp mutate(fixture, :release_amount) do
+    release = Repo.get_by!(LedgerEntry, request_id: fixture.request.id, entry_kind: "release")
+    Repo.update!(Ecto.Changeset.change(release, total_tokens: (release.total_tokens || 0) + 1))
+    fixture
+  end
+
+  defp mutate(fixture, mutation) when mutation in [:release_source, :release_reason, :release_status] do
+    release = Repo.get_by!(LedgerEntry, request_id: fixture.request.id, entry_kind: "release")
+
+    {key, value} =
+      case mutation do
+        :release_source -> {"reservation_source_event_id", "request:unrelated:reservation"}
+        :release_reason -> {"release_reason", "owner_drained"}
+        :release_status -> {"request_status", "in_progress"}
+      end
+
+    Repo.update!(Ecto.Changeset.change(release, details: Map.put(release.details, key, value)))
+    fixture
+  end
+
+  defp mutate(fixture, :request_transport), do: update_request(fixture, transport: "http_sse")
+
+  defp mutate(fixture, :session) do
+    session = fixture.opts.codex_session
+    other = session |> Map.from_struct() |> Map.drop([:id, :__meta__]) |> Map.put(:session_key, "different-#{System.unique_integer([:positive])}")
+    other = Repo.insert!(struct(CodexSession, other))
+    put_in(fixture.opts.codex_session, other)
   end
 
   defp update_request(fixture, attrs) do

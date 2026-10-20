@@ -89,7 +89,7 @@ defmodule CodexPooler.Accounting.ClientRetryPostgresTest do
     end)
   end
 
-  for predecessor_kind <- [:attempted, :pre_attempt_drain, :claim_only_drain] do
+  for predecessor_kind <- [:attempted, :pre_attempt_drain, :claim_only_drain, :pre_attempt_disconnect] do
     @predecessor_kind predecessor_kind
     test "two PostgreSQL backends race to one successor for #{@predecessor_kind}" do
       race_successor_claims(@predecessor_kind)
@@ -107,13 +107,16 @@ defmodule CodexPooler.Accounting.ClientRetryPostgresTest do
 
     parent = self()
     release = make_ref()
+    supervisor = start_supervised!(Task.Supervisor)
 
     tasks =
       for lane <- [:first, :second] do
-        Task.async(fn ->
-          claim_from_backend(fixture, parent, release, lane)
+        Task.Supervisor.async_nolink(supervisor, fn ->
+          claim_from_backend(fixture, parent, release, lane, predecessor_kind)
         end)
       end
+
+    monitors = Enum.map(tasks, &Process.monitor(&1.pid))
 
     ready =
       for _lane <- 1..2 do
@@ -122,9 +125,10 @@ defmodule CodexPooler.Accounting.ClientRetryPostgresTest do
       end
 
     assert ready |> Enum.map(&elem(&1, 1)) |> Enum.uniq() |> length() == 2
-    Enum.each(ready, fn {_lane, _backend, task_pid} -> send(task_pid, {:release, release}) end)
+    release_claimants(ready, release, predecessor_kind)
 
     results = Enum.map(tasks, &Task.await(&1, @detection_budget))
+    Enum.each(monitors, fn monitor -> assert_receive {:DOWN, ^monitor, :process, _pid, :normal}, @detection_budget end)
     assert Enum.count(results, &match?({:ok, %ClientRetry.SuccessorClaim{}}, &1)) == 1
     assert Enum.count(results, &match?({:error, :successor_claimed}, &1)) == 1
 
@@ -144,13 +148,39 @@ defmodule CodexPooler.Accounting.ClientRetryPostgresTest do
 
       successor_id = Repo.one!(from l in RequestClientRetryLink, select: l.successor_request_id)
       assert Repo.aggregate(from(a in Attempt, where: a.request_id == ^successor_id), :count) == 0
+
+      if predecessor_kind == :pre_attempt_disconnect do
+        alias CodexPooler.Accounting.LedgerEntry
+
+        assert Repo.aggregate(from(l in LedgerEntry, where: l.request_id == ^successor_id and l.entry_kind == "reservation"), :count) == 1
+        assert Repo.aggregate(from(l in LedgerEntry, where: l.request_id == ^fixture.predecessor_id and l.entry_kind == "release"), :count) == 1
+        refute Repo.exists?(from l in LedgerEntry, where: l.request_id in ^[successor_id, fixture.predecessor_id] and l.entry_kind == "settlement")
+      end
     end)
   end
 
-  defp claim_from_backend(fixture, parent, release, lane) do
+  defp release_claimants(ready, release, :pre_attempt_disconnect) do
+    {:first, first_backend, first_pid} = List.keyfind(ready, :first, 0)
+    {:second, second_backend, second_pid} = List.keyfind(ready, :second, 0)
+    send(first_pid, {:release, release})
+    assert_receive {:disconnect_claim_locked, ^release}, @detection_budget
+    send(second_pid, {:release, release})
+
+    Sandbox.unboxed_run(Repo, fn ->
+      await_blocked(second_backend, first_backend, System.monotonic_time(:millisecond) + @detection_budget)
+    end)
+
+    send(first_pid, {:release_disconnect_claim, release})
+  end
+
+  defp release_claimants(ready, release, _kind),
+    do: Enum.each(ready, fn {_lane, _backend, task_pid} -> send(task_pid, {:release, release}) end)
+
+  defp claim_from_backend(fixture, parent, release, lane, predecessor_kind) do
     Sandbox.unboxed_run(Repo, fn ->
       [[backend_pid]] = Repo.query!("SELECT pg_backend_pid()").rows
       send(parent, {:backend_ready, lane, backend_pid, self()})
+      opts = claim_barrier_opts(fixture.opts, parent, release, lane, predecessor_kind)
 
       receive do
         {:release, ^release} ->
@@ -158,13 +188,27 @@ defmodule CodexPooler.Accounting.ClientRetryPostgresTest do
             fixture.auth,
             fixture.model,
             fixture.payload,
-            fixture.opts
+            opts
           )
       after
         @detection_budget -> flunk("successor claim was not released")
       end
     end)
   end
+
+  defp claim_barrier_opts(opts, parent, release, :first, :pre_attempt_disconnect) do
+    Map.put(opts, :after_locks, fn ->
+      send(parent, {:disconnect_claim_locked, release})
+
+      receive do
+        {:release_disconnect_claim, ^release} -> :ok
+      after
+        @detection_budget -> flunk("disconnect successor lock was not released")
+      end
+    end)
+  end
+
+  defp claim_barrier_opts(opts, _parent, _release, _lane, _kind), do: opts
 
   test "a late old-attempt creator blocks behind the successor claim and cannot dispatch" do
     fixture = Sandbox.unboxed_run(Repo, fn -> committed_fixture(:pre_attempt_drain) end)
@@ -712,6 +756,27 @@ defmodule CodexPooler.Accounting.ClientRetryPostgresTest do
         request_metadata: Map.put(request.request_metadata || %{}, "websocket_pre_attempt_drain", true)
       )
     )
+  end
+
+  defp finalize_predecessor(setup, predecessor, turn, _now, :pre_attempt_disconnect) do
+    {:ok, %{request: reserved}} =
+      Accounting.reserve(setup.auth, setup.model, %{"model" => setup.model.exposed_model_id, "input" => []}, %{
+        transport: "websocket",
+        endpoint: predecessor.endpoint,
+        correlation_id: predecessor.correlation_id,
+        turn_claim: predecessor
+      })
+
+    {:ok, %{request: request}} =
+      Accounting.finalize_reservation_failure(reserved, %{
+        last_error_code: "client_disconnected",
+        usage_status: "usage_unknown",
+        response_status_code: 499,
+        pre_attempt_phase: PreAttemptRelease.turn_interrupted()
+      })
+
+    Repo.update!(Ecto.Changeset.change(turn, status: "interrupted", error_code: "client_disconnected", first_visible_output_at: nil, completed_at: request.completed_at))
+    request
   end
 
   # Same stamping contract as `:pre_attempt_drain` above: the marker is input to

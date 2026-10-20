@@ -530,6 +530,14 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
   defp validate_semantic_retry(request, :identical_resend, %{semantic_claim?: false} = scope, chain_edges),
     do: validate_semantic_retry(request, :identical_resend, Map.put(scope, :semantic_claim?, true), chain_edges)
 
+  # A pre-attempt disconnect has no provider verdict. Even a payload-domain
+  # claim must prove the native witness, epoch, session and single lineage.
+  defp validate_semantic_retry(request, :previsible_disconnect, %{semantic_claim?: false} = scope, chain_edges) do
+    if ClientRetry.verified_pre_attempt_disconnect?(lock_turn(request.id), request),
+      do: validate_semantic_retry(request, :previsible_disconnect, Map.put(scope, :semantic_claim?, true), chain_edges),
+      else: :ok
+  end
+
   defp validate_semantic_retry(request, shape, %{semantic_claim?: true} = scope, chain_edges) do
     turn = lock_turn(request.id)
     attempt = lock_final_attempt(turn, request.id)
@@ -1197,10 +1205,11 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
     turn = lock_turn(request.id)
     attempt = lock_final_attempt(turn, request.id)
 
-    match?(
-      {%CodexTurn{status: "interrupted", error_code: "client_disconnected", transport_kind: "websocket", first_visible_output_at: nil, completed_at: %DateTime{}}, %Attempt{status: "failed", network_error_code: "client_disconnected", transport: "websocket", replay_generation: 0, completed_at: %DateTime{}}},
-      {turn, attempt}
-    ) and request.transport == "websocket"
+    ClientRetry.verified_pre_attempt_disconnect?(turn, request) or
+      (match?(
+         {%CodexTurn{status: "interrupted", error_code: "client_disconnected", transport_kind: "websocket", first_visible_output_at: nil, completed_at: %DateTime{}}, %Attempt{status: "failed", network_error_code: "client_disconnected", transport: "websocket", replay_generation: 0, completed_at: %DateTime{}}},
+         {turn, attempt}
+       ) and request.transport == "websocket")
   end
 
   defp validation_input_count(scope) do

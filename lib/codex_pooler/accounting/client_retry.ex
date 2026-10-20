@@ -2034,9 +2034,10 @@ defmodule CodexPooler.Accounting.ClientRetry do
   end
 
   defp validate_retry_lifecycle(turn, request, nil) do
-    if verified_pre_attempt_drain?(turn, request) and
-         not Repo.exists?(from attempt in Attempt, where: attempt.request_id == ^request.id) and
-         released_without_settlement?(request.id) do
+    if verified_pre_attempt_disconnect?(turn, request) or
+         (verified_pre_attempt_drain?(turn, request) and
+            not Repo.exists?(from attempt in Attempt, where: attempt.request_id == ^request.id) and
+            released_without_settlement?(request.id)) do
       :ok
     else
       {:error, :terminal_predecessor}
@@ -2958,6 +2959,24 @@ defmodule CodexPooler.Accounting.ClientRetry do
 
   defp verified_pre_attempt_drain?(_turn, _request), do: false
 
+  # Admission holds the request lock. Attempt creation takes that same lock
+  # and rejects terminal requests before dispatch, so an absent attempt cannot
+  # appear after this proof. Ordinary disconnects do not carry drain authority:
+  # their proof is the interrupted invisible turn and its exact released
+  # reservation, with no attempt, settlement or replay entitlement.
+  @doc false
+  @spec verified_pre_attempt_disconnect?(CodexTurn.t() | nil, Request.t()) :: boolean()
+  def verified_pre_attempt_disconnect?(
+        %CodexTurn{request_id: request_id, status: "interrupted", error_code: "client_disconnected", transport_kind: "websocket", final_attempt_id: nil, first_visible_output_at: nil, completed_at: %DateTime{}},
+        %Request{id: request_id, status: "failed", response_status_code: 499, last_error_code: "client_disconnected", transport: "websocket", endpoint: "/backend-api/codex/responses", usage_status: "usage_unknown", completed_at: %DateTime{}}
+      ) do
+    not Repo.exists?(from attempt in Attempt, where: attempt.request_id == ^request_id) and
+      not Repo.exists?(from entitlement in RequestReplayEntitlement, where: entitlement.request_id == ^request_id) and
+      released_without_settlement?(request_id, "client_disconnected")
+  end
+
+  def verified_pre_attempt_disconnect?(_turn, _request), do: false
+
   # The reason alone no longer carries the whole claim. `owner_drained` is a
   # caller-chosen error code, and any future path that releases a reservation
   # for that reason at a different boundary would have passed this predicate
@@ -2968,7 +2987,7 @@ defmodule CodexPooler.Accounting.ClientRetry do
   # a release written before icoretech/codex-pooler-findings#187 carries
   # `unrecorded` and is refused, which costs a resend admitted during the
   # deploy that lands it and nothing after.
-  defp released_without_settlement?(request_id) do
+  defp released_without_settlement?(request_id, reason \\ "owner_drained") do
     entries =
       Repo.all(
         from entry in LedgerEntry,
@@ -2984,7 +3003,7 @@ defmodule CodexPooler.Accounting.ClientRetry do
           attempt_id: nil,
           settled_cost_micros: %Decimal{},
           details: %{
-            "release_reason" => "owner_drained",
+            "release_reason" => ^reason,
             @pre_attempt_phase_key => @turn_interrupted_phase
           }
         } = release,
@@ -2992,11 +3011,24 @@ defmodule CodexPooler.Accounting.ClientRetry do
       ] ->
         release.usage_status == "usage_unknown" and
           release.details["reservation_source_event_id"] == reservation.source_event_id and
-          Decimal.equal?(release.settled_cost_micros, 0)
+          Decimal.equal?(release.settled_cost_micros, 0) and
+          (reason == "owner_drained" or complete_disconnect_release?(release, reservation, request_id))
 
       _incomplete_or_settled ->
         false
     end
+  end
+
+  defp complete_disconnect_release?(release, reservation, request_id) do
+    alias CodexPooler.Accounting.RequestLifecycle.LedgerEntries
+
+    fields = [:pool_id, :api_key_id, :model_id, :transport, :currency_code, :input_tokens, :cached_input_tokens, :output_tokens, :reasoning_tokens, :total_tokens, :request_count, :estimated_cost_micros]
+
+    release.amount_status == "recorded" and reservation.amount_status == "recorded" and
+      release.details["request_status"] == "failed" and
+      release.source_event_id == LedgerEntries.release_source_event_id(request_id) and
+      reservation.source_event_id == LedgerEntries.reservation_source_event_id(request_id) and
+      Map.take(release, fields) == Map.take(reservation, fields)
   end
 
   defp validate_original_claim(%Request{correlation_id: correlation_id}) do
