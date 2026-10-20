@@ -42,6 +42,7 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamRelay do
                                                    before_finalize_failure_result()),
           optional(:before_finalize_success) => (relay_state() ->
                                                    before_finalize_success_result()),
+          optional(:observe_termination) => (relay_state(), atom(), term() -> relay_state()),
           optional(:buffer_telemetry_opts) => keyword(),
           optional(:keepalive_interval_ms) => non_neg_integer(),
           optional(:drain_token) => reference() | nil
@@ -98,6 +99,7 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamRelay do
   # upstream, let `before_finalize_failure` write whatever terminal the surface
   # already emits for an interruption, then finalize this attempt once.
   defp handle_stream_drain(reason, state, response, chunks, handlers) do
+    state = observe_termination(state, response, handlers, :pooler_stream_drain, reason)
     source_cancel(response)
     finish_stream_parts({:error, state, chunks, reason}, response, handlers)
   end
@@ -105,14 +107,15 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamRelay do
   defp handle_stream_keepalive(state, response, chunks, handlers) do
     state
     |> handlers.write_keepalive.()
-    |> stream_keepalive_result(state, chunks, response)
+    |> stream_keepalive_result(state, chunks, response, handlers)
     |> finish_stream_parts(response, handlers)
   end
 
-  defp stream_keepalive_result({:ok, state}, _previous_state, chunks, _response),
+  defp stream_keepalive_result({:ok, state}, _previous_state, chunks, _response, _handlers),
     do: {:cont, state, chunks}
 
-  defp stream_keepalive_result({:error, reason}, state, chunks, response) do
+  defp stream_keepalive_result({:error, reason}, state, chunks, response, handlers) do
+    state = observe_termination(state, response, handlers, :downstream_write_error, reason)
     source_cancel(response)
     {:error, state, chunks, {:chunk, reason}}
   end
@@ -127,6 +130,7 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamRelay do
 
   defp finalize_stream_parse_error(state, chunks, reason, response, handlers) do
     reason = stream_parse_error_reason(reason)
+    state = observe_termination(state, response, handlers, :http_stream_error, reason)
 
     case run_before_finalize_failure_hook(state, chunks, reason, handlers) do
       {:success, state, chunks} ->
@@ -174,8 +178,10 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamRelay do
   defp reduce_stream_part({:trailers, _trailers}, {:cont, state, chunks}, _response, _handlers),
     do: {:cont, {:cont, state, chunks}}
 
-  defp reduce_stream_part(:done, {:cont, state, chunks}, _response, _handlers),
-    do: {:halt, {:done, state, chunks}}
+  defp reduce_stream_part(:done, {:cont, state, chunks}, response, handlers) do
+    state = observe_termination(state, response, handlers, :http_body_done, :done)
+    {:halt, {:done, state, chunks}}
+  end
 
   defp stream_write_result({:ok, state}, _previous_state, chunks, data, _response, handlers),
     do: {:cont, {:cont, state, append_stream_chunk(chunks, data, handlers)}}
@@ -212,16 +218,19 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamRelay do
   end
 
   defp stream_write_result({:local_stream_failure, state, reason}, _previous_state, chunks, data, response, handlers) do
+    state = observe_termination(state, response, handlers, :pooler_stream_cancel, reason)
     source_cancel(response)
     {:halt, {:error, state, append_stream_chunk(chunks, data, handlers), reason}}
   end
 
-  defp stream_write_result({:error, reason, state}, _previous_state, chunks, _data, response, _handlers) do
+  defp stream_write_result({:error, reason, state}, _previous_state, chunks, _data, response, handlers) do
+    state = observe_termination(state, response, handlers, :downstream_write_error, reason)
     source_cancel(response)
     {:halt, {:error, state, chunks, {:chunk, reason}}}
   end
 
-  defp stream_write_result({:error, reason}, state, chunks, _data, response, _handlers) do
+  defp stream_write_result({:error, reason}, state, chunks, _data, response, handlers) do
+    state = observe_termination(state, response, handlers, :downstream_write_error, reason)
     source_cancel(response)
     {:halt, {:error, state, chunks, {:chunk, reason}}}
   end
@@ -246,8 +255,13 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamRelay do
         stream_finalization_result(finalize_success(handlers, chunks, state), state)
 
       {:failure, state, chunks, :native_preamble_limit_exceeded = reason} ->
+        state = observe_termination(state, response, handlers, :pooler_stream_cancel, reason)
         source_cancel(response)
         finish_stream_parts({:error, state, chunks, reason}, response, handlers)
+
+      {:failure, state, chunks, {:chunk, reason} = failure} ->
+        state = observe_termination(state, response, handlers, :downstream_write_error, reason)
+        stream_finalization_result(finalize_failure(handlers, chunks, failure, state), state)
 
       {:failure, state, chunks, reason} ->
         stream_finalization_result(finalize_failure(handlers, chunks, reason, state), state)
@@ -314,6 +328,13 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamRelay do
         {:failure, state, chunks, reason}
     end
   end
+
+  # WebsocketBridgeStream shares the relay protocol, but its :done is not an
+  # HTTP body end. Only Req's actual async source can supply this observation.
+  defp observe_termination(state, %Req.Response{body: %Req.Response.Async{}}, %{observe_termination: callback}, source, reason),
+    do: callback.(state, source, reason)
+
+  defp observe_termination(state, _response, _handlers, _source, _reason), do: state
 
   defp finalize_success(%{finalize_success: callback}, chunks, state)
        when is_function(callback, 2),

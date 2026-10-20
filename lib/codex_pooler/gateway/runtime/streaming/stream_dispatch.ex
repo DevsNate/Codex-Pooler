@@ -29,6 +29,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamDispatch do
   alias CodexPooler.Gateway.Transports.Streaming.StreamRelay
   alias CodexPooler.Gateway.Transports.Streaming.WebsocketBridgeStream
   alias CodexPooler.Gateway.Transports.Streaming.WebsocketCodec
+  alias CodexPooler.Gateway.Transports.TransportFailureReason
 
   @sse_keepalive_frame ": keepalive\n\n"
   # The released Codex client resets its stream idle timer only on a parsed SSE
@@ -155,6 +156,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamDispatch do
     )
     |> with_http_delivery_receipt(response_context)
     |> Map.merge(%{
+      observe_termination: &observe_http_termination/3,
       buffer_telemetry_opts: buffer_telemetry_opts(response_context),
       write_chunk: http_stream_writer(response_context),
       write_keepalive: http_sse_keepalive_writer(response_context.response),
@@ -178,11 +180,21 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamDispatch do
     # `before_finalize_success` keys prevents the HTTP synthetic terminal from
     # leaking onto the GET /v1/responses websocket. Do not add either key here.
     |> Map.merge(%{
+      observe_termination: &observe_http_termination/3,
       buffer_telemetry_opts: buffer_telemetry_opts(response_context),
       keepalive_interval_ms: 0,
       write_keepalive: fn state -> {:ok, state} end,
       write_chunk: websocket_stream_writer(response_context, writer)
     })
+  end
+
+  defp observe_http_termination(state, source, reason) when is_map(state) do
+    failure = TransportFailureReason.observed_http_stream_failure(source, reason)
+
+    case Map.get(state, :http_transport_failure) do
+      %{"termination_source" => "http_body_done"} -> Map.put(state, :http_transport_failure, failure)
+      _existing -> Map.put_new(state, :http_transport_failure, failure)
+    end
   end
 
   # The relay cannot name its own transport or route class; the request options

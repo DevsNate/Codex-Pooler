@@ -33,22 +33,6 @@ defmodule CodexPooler.Gateway.Transports.TransportFailureReason do
     invalid_legacy_id
     parser_rejected
   )
-  @allowed_termination_sources ~w(
-    connection_establish_error
-    continuation_generation_guard
-    mint_stream_done
-    mint_transport_error
-    payload_send_error
-    peer_close_frame
-    pooler_pong_deadline
-    pooler_receive_timeout
-    request_caller_down
-    session_unavailable
-    unexpected_binary_frame
-    upstream_terminal_event
-    websocket_control_send_error
-    websocket_decode_error
-  )
   @allowed_transport_signals ~w(
     ssl_closed
     ssl_data
@@ -116,6 +100,7 @@ defmodule CodexPooler.Gateway.Transports.TransportFailureReason do
       "reason" => safe_metadata_reason(reason),
       "phase" => safe_phase(Map.get(attrs, :phase) || Map.get(attrs, "phase")),
       "termination_source" => safe_termination_source(metadata_attr(attrs, "termination_source", :termination_source)),
+      "evidence_source" => SharedTransportFailureReason.safe_evidence_source(metadata_attr(attrs, "evidence_source", :evidence_source)),
       "transport_signal" => safe_transport_signal(metadata_attr(attrs, "transport_signal", :transport_signal)),
       "connection_use" => safe_connection_use(metadata_attr(attrs, "connection_use", :connection_use)),
       "connection_request_bucket" => safe_connection_request_bucket(metadata_attr(attrs, "connection_request_bucket", :connection_request_bucket)),
@@ -217,6 +202,7 @@ defmodule CodexPooler.Gateway.Transports.TransportFailureReason do
       "reason" => safe_metadata_identifier(metadata_attr(metadata, "reason", :reason)),
       "phase" => safe_phase(metadata_attr(metadata, "phase", :phase)),
       "termination_source" => safe_termination_source(metadata_attr(metadata, "termination_source", :termination_source)),
+      "evidence_source" => SharedTransportFailureReason.safe_evidence_source(metadata_attr(metadata, "evidence_source", :evidence_source)),
       "transport_signal" => safe_transport_signal(metadata_attr(metadata, "transport_signal", :transport_signal)),
       "connection_use" => safe_connection_use(metadata_attr(metadata, "connection_use", :connection_use)),
       "connection_request_bucket" => safe_connection_request_bucket(metadata_attr(metadata, "connection_request_bucket", :connection_request_bucket)),
@@ -291,6 +277,38 @@ defmodule CodexPooler.Gateway.Transports.TransportFailureReason do
   end
 
   def maybe_put_upstream_stream_interrupted_metadata(metadata, _reason, _body), do: metadata
+
+  # Called at the HTTP relay observation, before public interruption wrappers
+  # can replace the cause. A bare interruption reason alone is never EOF proof.
+  @spec observed_http_stream_failure(atom(), term()) :: transport_failure_metadata()
+  def observed_http_stream_failure(source, reason) do
+    {source, reason, phase} = http_stream_observation(source, reason)
+
+    transport_failure_metadata(reason, %{
+      termination_source: source,
+      evidence_source: :observed,
+      phase: phase
+    })
+  end
+
+  defp http_stream_observation(:http_body_done, _reason),
+    do: {:http_body_done, :done, :upstream_close}
+
+  defp http_stream_observation(:http_stream_error, {:upstream_idle_timeout, reason}),
+    do: {:http_receive_timeout, reason, :receive_timeout}
+
+  defp http_stream_observation(:http_stream_error, %module{} = reason)
+       when module in [Req.TransportError, Finch.TransportError, Mint.TransportError],
+       do: {:http_transport_error, reason, :receive}
+
+  defp http_stream_observation(:http_stream_error, %module{} = reason)
+       when module in [Req.HTTPError, Finch.HTTPError, Mint.HTTPError],
+       do: {:http_protocol_error, reason, :receive}
+
+  defp http_stream_observation(:downstream_write_error, reason),
+    do: {:downstream_write_error, reason, :send_payload}
+
+  defp http_stream_observation(source, reason), do: {source, reason, :receive}
 
   @spec upstream_transport_error(term(), map()) :: upstream_transport_error()
   def upstream_transport_error(reason, attrs) when is_map(attrs) do
@@ -386,7 +404,7 @@ defmodule CodexPooler.Gateway.Transports.TransportFailureReason do
   defp allow_phase(_phase), do: nil
 
   defp safe_termination_source(value),
-    do: safe_allowed_value(value, @allowed_termination_sources)
+    do: SharedTransportFailureReason.safe_termination_source(value)
 
   defp safe_transport_signal(value),
     do: safe_allowed_value(value, @allowed_transport_signals)

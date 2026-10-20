@@ -128,6 +128,8 @@ defmodule CodexPoolerWeb.Admin.RequestLogDetailDrawer.Attempts do
     prefix = "request-log-detail-transport-#{attempt.attempt_number}"
 
     [
+      detail("#{prefix}-evidence-source", "Evidence source", Map.get(failure, :evidence_source)),
+      detail("#{prefix}-termination-source", "Termination source", Map.get(failure, :termination_source), mono: true),
       detail("#{prefix}-exception", "Exception", Map.get(failure, :exception), mono: true),
       detail("#{prefix}-reason-class", "Reason class", Map.get(failure, :reason_class), mono: true),
       detail("#{prefix}-reason", "Reason", Map.get(failure, :reason), mono: true),

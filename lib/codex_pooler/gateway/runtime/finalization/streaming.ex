@@ -339,6 +339,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Streaming do
       )
       |> non_first_event_terminal_attempt_metadata(terminal_failure, code)
       |> TransportFailureReason.maybe_put_upstream_stream_interrupted_metadata(reason, body)
+      |> merge_http_transport_failure(stream_state)
       |> merge_websocket_transport_failure(websocket_attempt_metadata.transport_failure)
       |> correct_transport_failure_visibility(stream_state)
 
@@ -457,6 +458,13 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Streaming do
 
   defp upstream_websocket_attempt_metadata(%ResponseContext{}),
     do: %{upstream_websocket_connection: nil, transport_failure: nil}
+
+  defp merge_http_transport_failure(metadata, %{http_transport_failure: failure}) do
+    # Replace inferred wrapper metadata with the cause observed before wrapping.
+    Map.put(metadata, "transport_failure", TransportFailureReason.sanitize_transport_failure_metadata(failure))
+  end
+
+  defp merge_http_transport_failure(metadata, _stream_state), do: metadata
 
   defp merge_websocket_transport_failure(metadata, transport_failure) do
     transport_failure =

@@ -3,6 +3,7 @@ defmodule CodexPooler.Accounting.RequestLogs.DebugProjection.TransportFailure do
 
   alias CodexPooler.Accounting
   alias CodexPooler.Accounting.Attempt
+  alias CodexPooler.TransportFailureReason
 
   @transport_failure_phases ~w(
     connect
@@ -28,7 +29,10 @@ defmodule CodexPooler.Accounting.RequestLogs.DebugProjection.TransportFailure do
         transport_failure
 
       _transport_failure ->
-        stream_interruption_transport_failure(attempt, metadata)
+        case stream_interruption_transport_failure(attempt, metadata) do
+          failure when map_size(failure) > 0 -> Map.put(failure, "evidence_source", "inferred")
+          failure -> failure
+        end
     end
     |> safe_transport_failure()
   end
@@ -154,6 +158,7 @@ defmodule CodexPooler.Accounting.RequestLogs.DebugProjection.TransportFailure do
     )
     |> put_transport_failure_text(:reason, transport_failure_value(transport_failure, "reason"))
     |> put_transport_failure_phase(transport_failure_value(transport_failure, "phase"))
+    |> put_observation_fields(transport_failure)
     |> put_transport_failure_boolean(
       :pre_visible_output,
       transport_failure_value(transport_failure, "pre_visible_output")
@@ -182,6 +187,15 @@ defmodule CodexPooler.Accounting.RequestLogs.DebugProjection.TransportFailure do
     |> put_peer_close_reason_bytes(transport_failure_value(transport_failure, "peer_close_reason_bytes"))
   end
 
+  defp put_observation_fields(metadata, failure) do
+    source = failure |> transport_failure_value("termination_source") |> TransportFailureReason.safe_termination_source()
+    evidence = failure |> transport_failure_value("evidence_source") |> TransportFailureReason.safe_evidence_source()
+
+    metadata
+    |> put_transport_failure_text(:termination_source, source)
+    |> put_transport_failure_text(:evidence_source, evidence)
+  end
+
   @spec transport_failure_value(map(), String.t()) :: term()
   defp transport_failure_value(map, key) do
     case Map.fetch(map, key) do
@@ -190,6 +204,8 @@ defmodule CodexPooler.Accounting.RequestLogs.DebugProjection.TransportFailure do
     end
   end
 
+  defp transport_failure_atom_key("termination_source"), do: :termination_source
+  defp transport_failure_atom_key("evidence_source"), do: :evidence_source
   defp transport_failure_atom_key("exception"), do: :exception
   defp transport_failure_atom_key("reason_class"), do: :reason_class
   defp transport_failure_atom_key("reason"), do: :reason

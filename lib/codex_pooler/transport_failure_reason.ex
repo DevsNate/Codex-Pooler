@@ -3,6 +3,46 @@ defmodule CodexPooler.TransportFailureReason do
 
   @max_reason_length 96
 
+  @allowed_termination_sources ~w(
+    connection_establish_error
+    http_body_done
+    http_transport_error
+    http_protocol_error
+    http_receive_timeout
+    http_stream_error
+    pooler_stream_drain
+    downstream_write_error
+    pooler_stream_cancel
+    continuation_generation_guard
+    mint_stream_done
+    mint_transport_error
+    payload_send_error
+    peer_close_frame
+    pooler_pong_deadline
+    pooler_receive_timeout
+    request_caller_down
+    session_unavailable
+    unexpected_binary_frame
+    upstream_terminal_event
+    websocket_control_send_error
+    websocket_decode_error
+  )
+
+  @spec safe_termination_source(term()) :: String.t() | nil
+  def safe_termination_source(value), do: safe_allowed_value(value, @allowed_termination_sources)
+
+  @spec safe_evidence_source(term()) :: String.t() | nil
+  def safe_evidence_source(value), do: safe_allowed_value(value, ~w(observed inferred))
+
+  defp safe_allowed_value(value, allowed) when is_atom(value),
+    do: value |> Atom.to_string() |> safe_allowed_value(allowed)
+
+  defp safe_allowed_value(value, allowed) when is_binary(value) do
+    if value in allowed, do: value
+  end
+
+  defp safe_allowed_value(_value, _allowed), do: nil
+
   @spec safe_reason(term()) :: String.t() | nil
   def safe_reason(%Finch.TransportError{source: %Mint.TransportError{} = source}),
     do: safe_reason(source)

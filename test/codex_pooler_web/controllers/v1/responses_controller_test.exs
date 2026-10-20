@@ -8973,16 +8973,21 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
     assert FakeUpstream.count(upstream) == 1
 
     assert %{
-             "reason_class" => "upstream_stream_interrupted",
-             "reason" => "closed_before_terminal",
-             "phase" => "upstream_close",
-             "terminal_seen" => false,
+             "evidence_source" => "observed",
+             "termination_source" => "http_transport_error",
+             "reason_class" => "Mint.TransportError",
+             "reason" => "closed",
+             "phase" => "receive",
              "pre_visible_output" => false,
-             "text_frame_count" => text_frame_count,
              "exception" => "Finch.TransportError"
            } = attempt.response_metadata["transport_failure"]
 
-    assert text_frame_count >= 1
+    assert %{
+             "visible_seen" => true,
+             "delta_count" => 1,
+             "synthetic_terminal_sent" => true
+           } = attempt.response_metadata["public_openai_responses_stream"]
+
     assert Repo.all(from(d in BridgeDemotion)) == []
     assert Repo.all(from(c in RoutingCircuitState)) == []
 
@@ -10222,7 +10227,12 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
       assert [attempt] = Repo.all(from(a in Attempt, where: a.request_id == ^request.id))
       assert attempt.status == "failed"
       assert attempt.network_error_code == "stream_idle_timeout"
-      refute Map.has_key?(attempt.response_metadata, "transport_failure")
+
+      assert %{
+               "termination_source" => "http_receive_timeout",
+               "evidence_source" => "observed",
+               "reason" => "timeout"
+             } = attempt.response_metadata["transport_failure"]
     after
       Process.send_after(upstream_pid, {:fake_upstream_release_timeout, release_ref}, 250)
       Mint.HTTP.close(http_conn)

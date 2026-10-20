@@ -2146,6 +2146,7 @@ defmodule CodexPooler.Accounting.RequestLogsTest do
     # No `stream_text_frame_count` was recorded, so the projection reports
     # neither a count nor a visibility verdict (findings#165).
     assert attempt_debug.transport_failure == %{
+             evidence_source: "inferred",
              reason_class: "upstream_stream_interrupted",
              reason: "closed_before_terminal",
              phase: "upstream_close",
@@ -2288,6 +2289,7 @@ defmodule CodexPooler.Accounting.RequestLogsTest do
     refute Map.has_key?(by_number[1], :pre_visible_output)
 
     assert by_number[1] == %{
+             evidence_source: "inferred",
              reason_class: "downstream_client_disconnect",
              reason: "client_disconnected",
              phase: "send_payload",
@@ -2340,6 +2342,7 @@ defmodule CodexPooler.Accounting.RequestLogsTest do
     attempts_by_number = Map.new(log.debug.attempts, &{&1.attempt_number, &1.transport_failure})
 
     assert attempts_by_number[1] == %{
+             evidence_source: "inferred",
              reason_class: "downstream_client_disconnect",
              reason: "client_disconnected",
              phase: "send_payload",
@@ -2347,6 +2350,7 @@ defmodule CodexPooler.Accounting.RequestLogsTest do
            }
 
     assert attempts_by_number[2] == %{
+             evidence_source: "inferred",
              reason_class: "upstream_terminal_failure",
              reason: "server_error",
              phase: "receive",
@@ -2354,6 +2358,7 @@ defmodule CodexPooler.Accounting.RequestLogsTest do
            }
 
     assert attempts_by_number[3] == %{
+             evidence_source: "inferred",
              reason_class: "upstream_stream_idle_timeout",
              reason: "idle_timeout",
              phase: "receive_timeout",
@@ -2361,6 +2366,7 @@ defmodule CodexPooler.Accounting.RequestLogsTest do
            }
 
     assert attempts_by_number[4] == %{
+             evidence_source: "inferred",
              reason_class: "stream_interrupted",
              reason: "interrupted",
              phase: "receive",

@@ -1554,6 +1554,7 @@ defmodule CodexPooler.MCP.RequestLogsToolsTest do
     # The attempt records no `stream_text_frame_count`, so the visibility keys
     # are absent rather than fabricated (findings#165).
     assert attempt_debug["transport_failure"] == %{
+             "evidence_source" => "inferred",
              "reason_class" => "upstream_stream_interrupted",
              "reason" => "closed_before_terminal",
              "phase" => "upstream_close",

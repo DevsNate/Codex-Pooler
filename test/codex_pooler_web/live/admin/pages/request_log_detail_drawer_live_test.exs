@@ -86,6 +86,8 @@ defmodule CodexPoolerWeb.Admin.RequestLogDetailDrawerLiveTest do
     assert has_element?(view, "#request-log-detail-attempts", "Attempt 1")
     assert has_element?(view, "#request-log-detail-transport-failure-1", "Mint.TransportError")
     assert has_element?(view, "#request-log-detail-transport-failure-1", "closed")
+    refute has_element?(view, "#request-log-detail-transport-1-evidence-source")
+    refute has_element?(view, "#request-log-detail-transport-1-termination-source")
 
     render_click(element(view, "#request-log-detail-sidebar-close"))
 
@@ -107,6 +109,52 @@ defmodule CodexPoolerWeb.Admin.RequestLogDetailDrawerLiveTest do
     assert has_element?(view, "#request-log-detail-sidebar header p", correlation_id)
     assert has_element?(view, "#request-log-detail-correlation-id dd", correlation_id)
   end
+
+  for evidence_source <- ["observed", "inferred"] do
+    test "shows #{evidence_source} HTTP termination evidence without inventing its provenance", %{conn: conn, scope: scope} do
+      evidence_source = unquote(evidence_source)
+      pool = create_pool!(scope, %{slug: "termination-evidence", name: "Sample Pool"})
+
+      %{request: request} =
+        request_log_fixture(pool, %{
+          correlation_id: "req-termination-#{evidence_source}",
+          transport: "http_sse",
+          status: "failed",
+          last_error_code: "upstream_stream_error",
+          attempt_status: "failed",
+          attempt_network_error_code: "upstream_stream_error",
+          attempt_response_metadata: termination_evidence_metadata(evidence_source)
+        })
+
+      view = open_selected_request(conn, pool, request)
+
+      assert has_element?(view, "#request-log-detail-transport-1-evidence-source dd", evidence_source)
+
+      if evidence_source == "observed" do
+        assert has_element?(view, "#request-log-detail-transport-1-termination-source dd", "http_transport_error")
+        assert has_element?(view, "#request-log-detail-transport-1-reason dd", "closed")
+      else
+        refute has_element?(view, "#request-log-detail-transport-1-termination-source")
+        assert has_element?(view, "#request-log-detail-transport-1-reason dd", "closed_before_terminal")
+      end
+    end
+  end
+
+  defp termination_evidence_metadata("observed") do
+    %{
+      "error_kind" => "stream_interrupted",
+      "transport_failure" => %{
+        "evidence_source" => "observed",
+        "termination_source" => "http_transport_error",
+        "exception" => "Finch.TransportError",
+        "reason_class" => "Mint.TransportError",
+        "reason" => "closed",
+        "phase" => "receive"
+      }
+    }
+  end
+
+  defp termination_evidence_metadata("inferred"), do: %{"error_kind" => "stream_interrupted"}
 
   test "reasoning rows say what was not set and when the backend chose the model default", %{
     conn: conn,
@@ -304,6 +352,8 @@ defmodule CodexPoolerWeb.Admin.RequestLogDetailDrawerLiveTest do
             "reason_class" => "transport",
             "reason" => "closed",
             "phase" => "request",
+            "evidence_source" => sensitive_marker,
+            "termination_source" => sensitive_marker,
             "raw_reason_detail" => raw_transport_detail
           },
           "headers" => %{"authorization" => "Bearer #{sensitive_marker}"},

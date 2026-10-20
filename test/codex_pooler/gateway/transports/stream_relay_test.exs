@@ -459,6 +459,59 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamRelayTest do
     assert_process_down(monitor, pid)
   end
 
+  test "HTTP EOF observations do not claim a semantic terminal and preserve EOF flush write failures" do
+    ref = make_ref()
+    send(self(), {ref, :done})
+
+    callbacks =
+      handlers()
+      |> Map.merge(%{
+        observe_termination: fn state, source, reason ->
+          send(self(), {:observed, source, reason})
+          state
+        end,
+        before_finalize_success: fn state -> {:failure, state, "", {:chunk, :closed}} end
+      })
+
+    assert StreamRelay.run(:state, async_response(ref), callbacks) == {:error, {:chunk, :closed}}
+    assert_received {:observed, :http_body_done, :done}
+    assert_received {:observed, :downstream_write_error, :closed}
+  end
+
+  test "HTTP errors are observed before a failure hook can replace their reason" do
+    ref = make_ref()
+    error = %Finch.HTTPError{reason: :invalid_chunk_size}
+    send(self(), {ref, {:error, error}})
+
+    callbacks =
+      handlers()
+      |> Map.merge(%{
+        observe_termination: fn state, source, reason ->
+          send(self(), {:observed, source, reason})
+          state
+        end,
+        before_finalize_failure: fn state, reason -> {:failure, state, "", {:upstream_stream_interrupted, reason}} end
+      })
+
+    assert StreamRelay.run(:state, async_response(ref), callbacks) == {:error, {:upstream_stream_interrupted, error}}
+    assert_received {:observed, :http_stream_error, ^error}
+  end
+
+  test "websocket bridge done never produces an HTTP body end observation" do
+    ref = make_ref()
+    send(self(), {ref, :done})
+    response = %Req.Response{body: %CodexPooler.Gateway.Transports.Streaming.WebsocketBridgeStream{ref: ref, relay: self(), correlation_id: "synthetic-stream", settle_timeout_ms: 100}}
+
+    callbacks =
+      Map.put(handlers(), :observe_termination, fn state, source, reason ->
+        send(self(), {:observed, source, reason})
+        state
+      end)
+
+    assert StreamRelay.run(:state, response, callbacks) == {:ok, :state}
+    refute_received {:observed, _, _}
+  end
+
   defp assert_process_down(monitor, pid) do
     assert_receive {:DOWN, ^monitor, :process, ^pid, reason}, @relay_timeout
     assert reason in [:normal, :noproc]
