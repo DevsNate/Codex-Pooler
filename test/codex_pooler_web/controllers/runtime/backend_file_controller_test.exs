@@ -10,8 +10,12 @@ defmodule CodexPoolerWeb.Runtime.BackendFileControllerTest do
   alias CodexPooler.Files
   alias CodexPooler.Files.FileRecord
   alias CodexPooler.Gateway.Persistence.IdempotencyKey
+  alias CodexPooler.Gateway.Routing.RoutingSelection
   alias CodexPooler.Gateway.Transports.FileBridge
   alias CodexPooler.Repo
+  alias CodexPooler.Upstreams
+  alias CodexPooler.Upstreams.Schemas.EncryptedSecret
+  alias CodexPooler.Upstreams.Secrets
 
   setup do
     old_config = Application.get_env(:codex_pooler, Files, [])
@@ -30,6 +34,76 @@ defmodule CodexPoolerWeb.Runtime.BackendFileControllerTest do
     on_exit(fn -> Application.put_env(:codex_pooler, Files, old_config) end)
 
     :ok
+  end
+
+  for {failure, expected_secret_code} <- [
+        missing: :upstream_secret_not_found,
+        truncated: :upstream_secret_invalid_ciphertext,
+        authentication_tag: :upstream_secret_decryption_failed,
+        replaced_key: :upstream_secret_decryption_failed,
+        invalid_key: :upstream_secret_key_invalid
+      ] do
+    @tag :unavailable_file_credentials
+    test "file create and finalize record unavailable upstream credentials for #{failure}" do
+      CodexPooler.TestAppEnv.restore_on_exit(Upstreams)
+      setup = active_api_key_fixture()
+      file_id = "file_unavailable_credentials"
+      upstream = start_upstream(FakeUpstream.file_protocol_success(file_id: file_id))
+      selected = active_upstream_assignment_fixture(setup.pool, %{metadata: %{"base_url" => FakeUpstream.url(upstream)}, access_token: "synthetic-file-secret"})
+
+      created = build_conn() |> auth(setup) |> put_req_header("content-type", "application/json") |> post("/backend-api/files", %{"file_name" => "sample.txt", "file_size" => 12})
+      assert json_response(created, 200)["file_id"] == file_id
+      secret = Repo.one!(from(secret in EncryptedSecret, where: secret.upstream_identity_id == ^selected.identity.id and secret.secret_kind == "access_token" and secret.status == "active"))
+      fail_file_secret(secret, unquote(failure))
+      assert {:error, %{code: unquote(expected_secret_code)}} = Secrets.decrypt_active_secret(selected.identity, "access_token")
+      upstream_count = FakeUpstream.count(upstream)
+
+      route_metadata = %{"routing" => %{"route_class" => "file_upload", "selected_bridge_candidate_id" => selected.assignment.id}}
+      selection = %RoutingSelection{identity: selected.identity, assignment: selected.assignment, route_metadata: route_metadata}
+
+      for bridge_result <- [FileBridge.create_file(%{}, %{}, selection), FileBridge.finalize_file(file_id, %{}, selection)] do
+        assert {:error, %{status: 503, code: :upstream_credential_unavailable, upstream: ^route_metadata}} = bridge_result
+      end
+
+      for {endpoint, params} <- [{"/backend-api/files", %{"file_name" => "sample.txt", "file_size" => 12}}, {"/backend-api/files/#{file_id}/uploaded", %{}}] do
+        conn = build_conn() |> auth(setup) |> put_req_header("content-type", "application/json") |> post(endpoint, params)
+        assert %{"error" => %{"code" => "upstream_credential_unavailable", "type" => "server_error", "message" => "upstream credentials are unavailable", "param" => nil}} = json_response(conn, 503)
+        refute conn.resp_body =~ "synthetic-file-secret"
+        refute conn.resp_body =~ Base.encode64(secret.ciphertext)
+        refute conn.resp_body =~ "CODEX_POOLER_UPSTREAM_SECRET_KEY"
+      end
+
+      assert FakeUpstream.count(upstream) == upstream_count
+      failed = Repo.all(from(request in Request, where: request.api_key_id == ^setup.api_key.id and request.status == "failed"))
+      assert length(failed) == 2
+      assert Enum.sort(Enum.map(failed, & &1.endpoint)) == ["/backend-api/files", "/backend-api/files/uploaded"]
+
+      for request <- failed do
+        assert request.response_status_code == 503
+        assert request.request_metadata["error_code"] == "upstream_credential_unavailable"
+        assert get_in(request.request_metadata, ["routing", "route_class"]) == "file_upload"
+        refute inspect(request.request_metadata) =~ "synthetic-file-secret"
+        refute inspect(request.request_metadata) =~ Base.encode64(secret.ciphertext)
+      end
+
+      assert Repo.aggregate(from(file in FileRecord, where: file.api_key_id == ^setup.api_key.id), :count) == 1
+      file = Repo.get_by!(FileRecord, file_id: file_id)
+      assert file.status == "abandoned"
+      assert file.finalize_status == "failed"
+    end
+  end
+
+  defp fail_file_secret(secret, :missing), do: Repo.delete!(secret)
+  defp fail_file_secret(secret, :truncated), do: Repo.update!(Ecto.Changeset.change(secret, ciphertext: <<1>>))
+
+  defp fail_file_secret(secret, :authentication_tag) do
+    <<first, rest::binary>> = secret.ciphertext
+    Repo.update!(Ecto.Changeset.change(secret, ciphertext: <<Bitwise.bxor(first, 1)>> <> rest))
+  end
+
+  defp fail_file_secret(_secret, failure) when failure in [:invalid_key, :replaced_key] do
+    key = if failure == :invalid_key, do: "invalid-key", else: :crypto.strong_rand_bytes(32)
+    Application.put_env(:codex_pooler, Upstreams, Keyword.put(Application.get_env(:codex_pooler, Upstreams, []), :upstream_secret_key, key))
   end
 
   # findings#191: the file bridge relays an upstream create status verbatim, so

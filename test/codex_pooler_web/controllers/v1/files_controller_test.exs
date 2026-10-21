@@ -13,6 +13,7 @@ defmodule CodexPoolerWeb.V1.FilesControllerTest do
   alias CodexPooler.Files.UploadUrlPolicy
   alias CodexPooler.Gateway.Transports.FileBridge
   alias CodexPooler.Repo
+  alias CodexPooler.Upstreams.Schemas.EncryptedSecret
 
   # Failure-detection budget for an expected message: a green run returns as
   # soon as the message arrives, so only a missing one spends it.
@@ -44,6 +45,29 @@ defmodule CodexPoolerWeb.V1.FilesControllerTest do
     on_exit(fn -> Application.put_env(:codex_pooler, Files, old_files_config) end)
 
     :ok
+  end
+
+  @tag :multipart_lifecycle
+  @tag :unavailable_file_credentials
+  test "multipart create records unavailable stored upstream credentials before dispatch" do
+    setup = active_api_key_fixture()
+    upstream = start_upstream(FakeUpstream.file_protocol_success(file_id: "file_unavailable_multipart"))
+    selected = active_upstream_assignment_fixture(setup.pool, %{metadata: %{"base_url" => FakeUpstream.url(upstream)}})
+    Repo.delete_all(from(secret in EncryptedSecret, where: secret.upstream_identity_id == ^selected.identity.id and secret.secret_kind == "access_token"))
+    upload = upload_fixture("sample.txt", "text/plain", "synthetic file bytes")
+
+    conn = build_conn() |> auth(setup) |> post("/v1/files", %{"purpose" => "user_data", "file" => upload})
+    assert %{"error" => %{"code" => "upstream_credential_unavailable", "type" => "server_error", "message" => "upstream credentials are unavailable"}} = json_response(conn, 503)
+    assert FakeUpstream.count(upstream) == 0
+    assert Repo.aggregate(from(file in FileRecord, where: file.api_key_id == ^setup.api_key.id), :count) == 0
+    request = Repo.one!(from(request in Request, where: request.api_key_id == ^setup.api_key.id))
+    assert request.endpoint == "/v1/files"
+    assert request.status == "failed"
+    assert request.response_status_code == 503
+    assert request.request_metadata["error_code"] == "upstream_credential_unavailable"
+    assert get_in(request.request_metadata, ["routing", "route_class"]) == "file_upload"
+    refute conn.resp_body =~ selected.access_token
+    refute inspect(request.request_metadata) =~ selected.access_token
   end
 
   @tag :multipart_lifecycle

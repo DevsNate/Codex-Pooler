@@ -263,9 +263,16 @@ defmodule CodexPooler.Gateway.Transports.FileBridge do
     identity = selection.identity
 
     with {:ok, token} <-
-           Secrets.decrypt_active_secret(identity, @secret_kind),
+           file_bridge_access_token(selection),
          {:ok, url} <- endpoint_url(identity, assignment, endpoint) do
       {:ok, %{assignment: assignment, identity: identity, token: token, url: url}}
+    end
+  end
+
+  defp file_bridge_access_token(%RoutingSelection{} = selection) do
+    case Secrets.decrypt_active_secret(selection.identity, @secret_kind) do
+      {:ok, token} -> {:ok, token}
+      {:error, _reason} -> {:error, safe_error(503, :upstream_credential_unavailable, "upstream credentials are unavailable", selection.route_metadata)}
     end
   end
 
