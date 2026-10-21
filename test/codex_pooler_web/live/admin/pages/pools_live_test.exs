@@ -1291,6 +1291,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
     refute has_element?(view, "##{description_id}")
   end
 
+  @tag :pool_five_minutes
   @tag :pool_partial_hour
   test "renders the first partial hour in pool chart header totals and chart series", %{scope: scope} do
     {:ok, pool} = Pools.create_pool(scope, %{slug: "partial-hour-chart", name: "Partial Hour Chart"})
@@ -1326,8 +1327,10 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
     assert metrics.request_count == 2
     assert totals == ["100", "2"]
     assert document |> LazyHTML.query("#pool-row-#{pool.id}-request-count") |> LazyHTML.text() |> String.trim() == "2"
-    assert Enum.find(series, &(&1["name"] == "Tokens"))["data"] == [30, 70]
-    assert Enum.find(series, &(&1["name"] == "Requests"))["data"] == [1, 1]
+    [categories_json] = document |> LazyHTML.query(plot_selector) |> LazyHTML.attribute("data-chart-categories")
+    assert CodexPooler.JSON.decode!(categories_json) == ~w(15:10 15:15 15:20 15:25 15:30 15:35 15:40 15:45 15:50 15:55 16:00 16:05 16:10)
+    assert Enum.find(series, &(&1["name"] == "Tokens"))["data"] == [0, 0, 30, 0, 0, 0, 0, 0, 0, 0, 0, 70, 0]
+    assert Enum.find(series, &(&1["name"] == "Requests"))["data"] == [0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0]
     assert document |> LazyHTML.query(plot_selector) |> LazyHTML.attribute("aria-label") == []
     assert document |> LazyHTML.query(plot_selector) |> LazyHTML.attribute("aria-labelledby") == ["pool-row-#{pool.id}-traffic-histogram-description"]
     assert document |> LazyHTML.query("#pool-row-#{pool.id}-traffic-histogram-description") |> LazyHTML.text() |> String.trim() == "Traffic in the last 1h: 100 tokens and 2 requests"

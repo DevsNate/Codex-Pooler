@@ -1507,6 +1507,74 @@ defmodule CodexPooler.Admin.StatsTest do
     assert dashboard.sources.usage_source == :raw_ledger_fallback
   end
 
+  @tag :pool_five_minutes
+  test "pool one-hour traffic zero-fills UTC five-minute slots without losing inclusive edges" do
+    pool = pool_fixture()
+    %{api_key: api_key} = active_api_key_fixture(pool)
+    %{identity: identity, assignment: assignment} = upstream_assignment_fixture(pool)
+    as_of = ~U[2026-01-10 16:12:30.123456Z]
+    started_at = ~U[2026-01-10 15:12:30.123456Z]
+
+    for {timestamp, tokens} <- [
+          {DateTime.add(started_at, -1, :microsecond), 1_000},
+          {started_at, 10},
+          {~U[2026-01-10 15:14:59.999999Z], 20},
+          {~U[2026-01-10 15:15:00.000000Z], 30},
+          {~U[2026-01-10 15:15:00.000001Z], 40},
+          {~U[2026-01-10 15:20:00.000000Z], 50},
+          {as_of, 60},
+          {DateTime.add(as_of, 1, :microsecond), 2_000}
+        ] do
+      insert_timed_usage!(pool, api_key, assignment, identity, timestamp, tokens)
+    end
+
+    insert_timed_usage!(pool, api_key, assignment, identity, ~U[2026-01-10 15:25:00.000000Z], 9_000, %{usage_status: "usage_unknown"})
+    other_pool = pool_fixture()
+    %{api_key: other_key} = active_api_key_fixture(other_pool)
+    %{identity: other_identity, assignment: other_assignment} = upstream_assignment_fixture(other_pool)
+    insert_timed_usage!(other_pool, other_key, other_assignment, other_identity, as_of, 5_000)
+
+    labels = Enum.map(~w(15:10 15:15 15:20 15:25 15:30 15:35 15:40 15:45 15:50 15:55 16:00 16:05 16:10), &("2026-01-10T" <> &1 <> ":00Z"))
+    requests = [2, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1]
+    tokens = [30, 70, 50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 60]
+
+    for zone <- ["UTC", "Asia/Kathmandu"] do
+      Repo.query!("SELECT set_config('TimeZone', $1, true)", [zone])
+      assert Repo.query!("SHOW TimeZone").rows == [[zone]]
+      metrics = Stats.pool_usage_metrics_by_pool_ids([pool.id], as_of: as_of, traffic_window: "1h")[pool.id]
+
+      assert metrics.request_count == 7
+      assert metrics.total_tokens == 210
+      assert metrics.request_histogram == Enum.zip_with(labels, requests, &%{bucket: &1, requests: &2})
+      assert metrics.token_histogram == Enum.zip_with(labels, tokens, &%{bucket: &1, total_tokens: &2})
+      assert Enum.sum_by(metrics.request_histogram, & &1.requests) == metrics.request_count
+      assert Enum.sum_by(metrics.token_histogram, & &1.total_tokens) == metrics.total_tokens
+    end
+  end
+
+  @tag :pool_five_minutes
+  test "pool one-hour histogram uses its custom start independently of summary bounds" do
+    pool = pool_fixture()
+    %{api_key: api_key} = active_api_key_fixture(pool)
+    %{identity: identity, assignment: assignment} = upstream_assignment_fixture(pool)
+    as_of = ~U[2026-01-10 16:12:30.000000Z]
+    histogram_started_at = ~U[2026-01-10 15:47:31.000000Z]
+
+    for {timestamp, tokens} <- [{~U[2026-01-10 15:20:00.000000Z], 10}, {DateTime.add(histogram_started_at, -1, :microsecond), 20}, {histogram_started_at, 30}, {as_of, 40}, {DateTime.add(as_of, 1, :microsecond), 5_000}] do
+      insert_timed_usage!(pool, api_key, assignment, identity, timestamp, tokens)
+    end
+
+    result = Stats.pool_usage_by_pool_ids([pool.id], as_of: as_of, traffic_window: "1h", histogram_started_at: histogram_started_at, histogram_pool_ids: [pool.id])
+    summary = result.summary_by_pool_id[pool.id]
+    histogram = result.histogram_by_pool_id[pool.id]
+    labels = Enum.map(~w(15:45 15:50 15:55 16:00 16:05 16:10), &("2026-01-10T" <> &1 <> ":00Z"))
+
+    assert summary.request_count == 4
+    assert summary.total_tokens == 100
+    assert histogram.request_histogram == Enum.zip_with(labels, [1, 0, 0, 0, 0, 1], &%{bucket: &1, requests: &2})
+    assert histogram.token_histogram == Enum.zip_with(labels, [30, 0, 0, 0, 0, 40], &%{bucket: &1, total_tokens: &2})
+  end
+
   @tag :pool_partial_hour
   test "pool rolling hour includes persisted requests and settlements from its first partial hour" do
     pool = pool_fixture()
@@ -1549,18 +1617,29 @@ defmodule CodexPooler.Admin.StatsTest do
 
       assert metrics.request_count == 4
       assert metrics.total_tokens == 100
-      assert length(metrics.request_histogram) == unquote(hours) + 1
-      assert hd(metrics.request_histogram).requests == 2
-      assert List.last(metrics.request_histogram).requests == 2
-      assert hd(metrics.token_histogram).total_tokens == 30
-      assert List.last(metrics.token_histogram).total_tokens == 70
+
+      if unquote(window) == "1h" do
+        assert length(metrics.request_histogram) == 13
+        assert hd(metrics.request_histogram).requests == 1
+        assert List.last(metrics.request_histogram).requests == 1
+        assert hd(metrics.token_histogram).total_tokens == 10
+        assert List.last(metrics.token_histogram).total_tokens == 40
+      else
+        assert length(metrics.request_histogram) == unquote(hours) + 1
+        assert hd(metrics.request_histogram).requests == 2
+        assert List.last(metrics.request_histogram).requests == 2
+        assert hd(metrics.token_histogram).total_tokens == 30
+        assert List.last(metrics.token_histogram).total_tokens == 70
+      end
+
       assert Enum.sum_by(metrics.request_histogram, & &1.requests) == metrics.request_count
       assert Enum.sum_by(metrics.token_histogram, & &1.total_tokens) == metrics.total_tokens
     end
   end
 
+  @tag :pool_five_minutes
   @tag :pool_partial_hour
-  test "pool hourly histogram includes exact aligned start and end buckets" do
+  test "pool five-minute histogram includes exact aligned start and end buckets" do
     pool = pool_fixture()
     %{api_key: api_key} = active_api_key_fixture(pool)
     %{identity: identity, assignment: assignment} = upstream_assignment_fixture(pool)
@@ -1574,8 +1653,9 @@ defmodule CodexPooler.Admin.StatsTest do
     metrics = Stats.pool_usage_metrics_by_pool_ids([pool.id], as_of: as_of, traffic_window: "1h")[pool.id]
     assert metrics.request_count == 2
     assert metrics.total_tokens == 100
-    assert metrics.request_histogram == [%{bucket: "2026-01-10T15:00:00Z", requests: 1}, %{bucket: "2026-01-10T16:00:00Z", requests: 1}]
-    assert metrics.token_histogram == [%{bucket: "2026-01-10T15:00:00Z", total_tokens: 30}, %{bucket: "2026-01-10T16:00:00Z", total_tokens: 70}]
+    labels = Enum.map(~w(15:00 15:05 15:10 15:15 15:20 15:25 15:30 15:35 15:40 15:45 15:50 15:55 16:00), &("2026-01-10T" <> &1 <> ":00Z"))
+    assert metrics.request_histogram == Enum.zip_with(labels, [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], &%{bucket: &1, requests: &2})
+    assert metrics.token_histogram == Enum.zip_with(labels, [30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 70], &%{bucket: &1, total_tokens: &2})
   end
 
   @tag :pool_partial_hour
@@ -2152,7 +2232,7 @@ defmodule CodexPooler.Admin.StatsTest do
       10
     )
 
-    for {window, bucket_count} <- [{"1h", 2}, {"5h", 6}, {"24h", 25}, {"7d", 7}] do
+    for {window, bucket_count} <- [{"1h", 13}, {"5h", 6}, {"24h", 25}, {"7d", 7}] do
       metrics =
         Stats.pool_usage_metrics_by_pool_ids([pool.id],
           as_of: as_of,

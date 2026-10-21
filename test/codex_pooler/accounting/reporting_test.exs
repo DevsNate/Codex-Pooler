@@ -265,6 +265,33 @@ defmodule CodexPooler.Accounting.ReportingTest do
            ]
   end
 
+  @tag :pool_five_minutes
+  test "five-minute settlement buckets preserve UTC edges and known usage across pools" do
+    pool = pool_fixture()
+    %{api_key: api_key} = active_api_key_fixture(pool)
+    %{identity: identity, assignment: assignment} = upstream_assignment_fixture(pool)
+    other_pool = pool_fixture()
+    %{api_key: other_key} = active_api_key_fixture(other_pool)
+    %{identity: other_identity, assignment: other_assignment} = upstream_assignment_fixture(other_pool)
+    started_at = ~U[2026-01-10 23:02:30.000000Z]
+    ended_at = ~U[2026-01-11 00:02:30.000000Z]
+
+    for {timestamp, tokens} <- [{DateTime.add(started_at, -1, :microsecond), 1_000}, {started_at, 10}, {~U[2026-01-10 23:04:59.999999Z], 20}, {~U[2026-01-10 23:05:00.000000Z], 30}, {ended_at, 40}, {DateTime.add(ended_at, 1, :microsecond), 2_000}] do
+      insert_settlement!(pool, api_key, assignment, identity, timestamp, %{total_tokens: tokens, input_tokens: tokens, output_tokens: 0, settled_cost_micros: tokens})
+    end
+
+    insert_settlement!(pool, api_key, assignment, identity, ended_at, %{usage_status: "usage_unknown", total_tokens: 9_000, input_tokens: 9_000, settled_cost_micros: 9_000})
+    insert_settlement!(other_pool, other_key, other_assignment, other_identity, ended_at, %{total_tokens: 5_000})
+
+    for zone <- ["UTC", "Asia/Kathmandu"] do
+      Repo.query!("SELECT set_config('TimeZone', $1, true)", [zone])
+      assert Repo.query!("SHOW TimeZone").rows == [[zone]]
+      rows = Reporting.settlement_usage_buckets_for_pool_ids([pool.id], :five_minutes, started_at, ended_at)
+      assert Enum.map(rows, &{&1.bucket, &1.request_count, &1.total_tokens, &1.settled_cost_micros}) == [{~U[2026-01-10 23:00:00.000000Z], 2, 30, 30}, {~U[2026-01-10 23:05:00.000000Z], 1, 30, 30}, {~U[2026-01-11 00:00:00.000000Z], 2, 40, 40}]
+      assert Enum.all?(rows, &(&1.pool_id == pool.id))
+    end
+  end
+
   test "settlement usage buckets reject unsupported shapes without querying" do
     started_at = ~U[2026-01-10 11:00:00.000000Z]
     ended_at = ~U[2026-01-10 12:00:00.000000Z]

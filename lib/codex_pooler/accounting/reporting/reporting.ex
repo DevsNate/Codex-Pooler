@@ -39,7 +39,7 @@ defmodule CodexPooler.Accounting.Reporting do
           required(:confidence) => :temporal_containment_only,
           required(:rows) => [model_usage_bucket()]
         }
-  @type settlement_bucket_granularity :: :hour | :day
+  @type settlement_bucket_granularity :: :five_minutes | :hour | :day
   @type daily_rollup_coverage_status :: :complete | :incomplete | :missing | :incompatible
   @type covered_pool_daily_usage_row :: %{
           required(:pool_id) => Ecto.UUID.t(),
@@ -184,7 +184,7 @@ defmodule CodexPooler.Accounting.Reporting do
         %DateTime{} = started_at,
         %DateTime{} = ended_at
       )
-      when granularity in [:hour, :day] do
+      when granularity in [:five_minutes, :hour, :day] do
     pool_ids = valid_pool_ids(pool_ids)
 
     if pool_ids == [] or DateTime.compare(started_at, ended_at) == :gt do
@@ -526,6 +526,21 @@ defmodule CodexPooler.Accounting.Reporting do
     entries
     |> select_settlement_bucket(granularity)
     |> aggregate_settlement_buckets()
+  end
+
+  defp select_settlement_bucket(query, :five_minutes) do
+    select(query, [entry], %{
+      pool_id: entry.pool_id,
+      bucket: type(fragment("date_bin(INTERVAL '5 minutes', ? AT TIME ZONE 'UTC', TIMESTAMP '1970-01-01')", entry.occurred_at), :utc_datetime_usec),
+      request_count: entry.request_count,
+      usage_status: entry.usage_status,
+      input_tokens: entry.input_tokens,
+      cached_input_tokens: entry.cached_input_tokens,
+      output_tokens: entry.output_tokens,
+      reasoning_tokens: entry.reasoning_tokens,
+      total_tokens: entry.total_tokens,
+      settled_cost_micros: entry.settled_cost_micros
+    })
   end
 
   defp select_settlement_bucket(query, :hour) do

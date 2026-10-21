@@ -982,8 +982,8 @@ defmodule CodexPoolerWeb.Admin.PoolListComponents do
     }
   end
 
-  defp format_chart_bucket(<<_date::binary-size(10), "T", hour::binary-size(2), ":00:00Z">>),
-    do: hour <> ":00"
+  defp format_chart_bucket(<<_date::binary-size(10), "T", hour::binary-size(2), ":", minute::binary-size(2), ":00Z">>),
+    do: hour <> ":" <> minute
 
   defp format_chart_bucket(bucket), do: to_string(bucket)
 
