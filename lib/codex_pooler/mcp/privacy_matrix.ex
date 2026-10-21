@@ -270,7 +270,7 @@ defmodule CodexPooler.MCP.PrivacyMatrix do
         :quota_windows
       ],
       masked: [],
-      summarized: [:capacity_decision],
+      summarized: [:capacity_decision, :saved_resets],
       omitted: [
         :account_email,
         :upstream_account_email,
@@ -550,8 +550,32 @@ defmodule CodexPooler.MCP.PrivacyMatrix do
 
   defp summarize(:capacity_decision, _value), do: %{}
   defp summarize(:last_login_at, %DateTime{} = value), do: DateTime.to_iso8601(value)
+
+  defp summarize(:saved_resets, value) when is_map(value) and not is_struct(value) do
+    status = bounded_enum(value, :status, ~w(reported unreported unavailable), "unreported")
+    count = fetch_summary(value, :available_count)
+    observed_at = fetch_summary(value, :observed_at)
+
+    %{
+      status: status,
+      available_count: if(status == "reported" and is_integer(count) and count >= 0, do: count),
+      observed_at: saved_reset_timestamp(observed_at)
+    }
+  end
+
+  defp summarize(:saved_resets, _value), do: %{status: "unreported", available_count: nil, observed_at: nil}
+
   defp summarize(_field, value) when is_map(value), do: Map.take(value, safe_summary_keys(value))
   defp summarize(_field, value), do: value
+
+  defp saved_reset_timestamp(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, timestamp, _offset} -> DateTime.to_iso8601(timestamp)
+      _invalid -> nil
+    end
+  end
+
+  defp saved_reset_timestamp(_value), do: nil
 
   defp bounded_enum(value, key, allowed, fallback) do
     candidate = fetch_summary(value, key)

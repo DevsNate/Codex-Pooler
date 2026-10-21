@@ -147,7 +147,7 @@ defmodule CodexPooler.MCP.Tools.QuotaMetadata do
       description:
         ToolRegistry.metadata_description(
           use_when: "an MCP client needs bounded discovery of sanitized quota evidence for upstream accounts visible to the authenticated operator",
-          returns: "sanitized upstream account summaries with quota summary and quota window evidence only",
+          returns: "sanitized upstream account summaries with quota summary, quota window evidence, and recorded saved-reset status, count, and observation time",
           never_returns: "raw selectors, raw filter values, auth.json, raw metadata, provider payloads, websocket frames, or raw idempotency keys",
           filters_limits: "accepts optional pool_id, status, plan_family, freshness_status, routing_usable, limit, and offset; limit is clamped to 1..100 and offset to 0..10000"
         ),
@@ -165,7 +165,7 @@ defmodule CodexPooler.MCP.Tools.QuotaMetadata do
       description:
         ToolRegistry.metadata_description(
           use_when: "an MCP client needs exact sanitized quota evidence for one visible upstream account",
-          returns: "one sanitized upstream account quota summary, a not-found marker, or structured ambiguity candidates when the selector matches multiple accounts",
+          returns: "one sanitized upstream account quota summary including recorded saved-reset status, count, and observation time, a not-found marker, or structured ambiguity candidates when the selector matches multiple accounts",
           never_returns: "raw selectors, raw filter values, auth.json, raw metadata, provider payloads, websocket frames, or raw idempotency keys",
           filters_limits: "selector is required; exact id and stored account id are preferred, label matches can be ambiguous, and ambiguity candidates are bounded to 10"
         ),

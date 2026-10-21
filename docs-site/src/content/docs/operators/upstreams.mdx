@@ -106,6 +106,17 @@ Provider-attested availability remains conservative. A credit fallback requires 
 
 This state comes from Codex Pooler's direct provider usage response. Current Codex client quota projections omit the raw availability flags, so a client-side quota snapshot cannot independently confirm the same no-window observation.
 
+## Read saved-reset counts through MCP
+
+The read-only `codex_pooler_list_upstream_quotas` and `codex_pooler_get_upstream_quota` tools include
+`saved_resets` on each account: `status` (`reported`, `unreported`, or `unavailable`), `available_count`
+(a nonnegative integer or `null`), and `observed_at` (the recorded observation time or `null`).
+An explicit reported zero is different from an unknown count. These are the existing persisted bank
+observations, not a live provider refresh or a guarantee of current redemption eligibility. A client
+must not sum an unknown account as zero or present a partial sum as a complete pool total.
+No credit identifiers, provider payloads, redemption state or credentials are exposed. Reading either
+tool does not refresh accounts, redeem resets, or change automatic redemption policy.
+
 ## Use provider credits
 
 **Use provider credits** is an upstream-level admission policy, enabled by default for existing and newly added upstreams. It applies to every Pool using that upstream identity. Changing it requires operator authority across all of those Pools; it is not a per-Pool spending choice.

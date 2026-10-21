@@ -283,6 +283,30 @@ defmodule CodexPooler.MCP.PrivacyMatrixTest do
     assert sanitized["credential_epoch"] == 3
   end
 
+  test "saved-reset summary rejects raw fields and invalid counts or timestamps" do
+    assert PrivacyMatrix.field_policy!(:upstream_quotas, :saved_resets) == :summarized
+
+    for count <- [-1, "4", 1.5, nil] do
+      projected =
+        PrivacyMatrix.project!(:upstream_quotas, %{
+          saved_resets: %{status: "reported", available_count: count, observed_at: "private-provider-payload", credit_id: "private-credit-id"}
+        })
+
+      assert projected.saved_resets == %{status: "reported", available_count: nil, observed_at: nil}
+    end
+
+    projected =
+      PrivacyMatrix.project!(:upstream_quotas, %{
+        saved_resets: %{
+          "status" => "unexpected",
+          "available_count" => 4,
+          "observed_at" => "2026-10-18T12:00:00Z"
+        }
+      })
+
+    assert projected.saved_resets == %{status: "unreported", available_count: nil, observed_at: "2026-10-18T12:00:00Z"}
+  end
+
   test "quota projections keep DTO fields and omit raw upstream material" do
     account =
       PrivacyMatrix.project!(:upstream_quotas, %{
