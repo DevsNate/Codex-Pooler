@@ -194,7 +194,10 @@ defmodule CodexPoolerWeb.Runtime.SettlementTransactionHold do
   a sample whose statement is not that lookup is not the wait yet and is
   sampled again (findings#206 row 206-182). Other writers wait on the held
   rows too (a closed socket's delivery receipt on the attempt); only the
-  lookup is the resend's.
+  lookup is the resend's. A cleanup that reached the same row first can
+  stand between the resend and settler in PostgreSQL's lock queue, so follow
+  the complete blocking chain. UNION deduplicates backend ids and terminates
+  even if the sampled graph contains a cycle.
   """
   @spec await_session_lookup_wait!(pid(), pos_integer()) :: String.t()
   def await_session_lookup_wait!(watcher, settler_backend) when is_integer(settler_backend) do
@@ -206,10 +209,19 @@ defmodule CodexPoolerWeb.Runtime.SettlementTransactionHold do
       Postgrex.query!(
         watcher,
         """
+        WITH RECURSIVE waiters(pid) AS (
+          SELECT pid FROM pg_stat_activity
+          WHERE datname = current_database() AND $1 = ANY(pg_blocking_pids(pid))
+          UNION
+          SELECT activity.pid FROM pg_stat_activity AS activity
+          INNER JOIN waiters ON waiters.pid = ANY(pg_blocking_pids(activity.pid))
+          WHERE activity.datname = current_database()
+        )
         SELECT activity.query, tuple_lock.relation::regclass::text
-        FROM pg_stat_activity AS activity
+        FROM waiters
+        INNER JOIN pg_stat_activity AS activity ON activity.pid = waiters.pid
         LEFT JOIN pg_locks AS tuple_lock ON tuple_lock.pid = activity.pid AND tuple_lock.locktype = 'tuple'
-        WHERE activity.datname = current_database() AND activity.wait_event_type = 'Lock' AND $1 = ANY(pg_blocking_pids(activity.pid))
+        WHERE activity.wait_event_type = 'Lock'
         """,
         [settler_backend]
       )
