@@ -79,17 +79,22 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   # the client, never on a frame this socket pushes, and the released client
   # sends nothing while it reads a response, so a turn streaming longer than the
   # bound was closed in the middle (findings#302). The first delivered frame
-  # immediately pings the client; every third of the bound the socket pings
-  # again only for later frames delivered since the previous tick. The client's
+  # immediately pings the client; every third of the bound (at most ten seconds)
+  # the socket pings again only for later frames delivered since the previous tick. The client's
   # pong re-arms the read timer. No output buys no ping, and a single frame
   # cannot buy a second extension at the following tick.
+  # Native compaction is different: its collector deliberately withholds all
+  # provider frames until validation. Keep that active wait alive with a ping
+  # and an ignored JSON event (the client's response idle timer ignores pings).
+  # Neither is delivery evidence or owner progress; upstream receive deadlines
+  # still bound stalled providers, and the client must still answer the ping.
   # The same tick tells each owner-forwarded task that progressed
   # (`DownstreamProgress`): a remote owner's submission waits on those notices.
   # The tick carries the counts it saw instead of keeping them in the state
   # (socket tests compare whole states). The interval reads the settings the
   # upgrade read a moment earlier.
   defp start_downstream_keepalive({:ok, _state} = result) do
-    interval_ms = max(div(OperationalSettings.current().websocket_idle_timeout_ms, 3), 1)
+    interval_ms = OperationalSettings.current().websocket_idle_timeout_ms |> div(3) |> min(10_000) |> max(1)
     :ok = schedule_downstream_keepalive(interval_ms, %{})
     result
   end
@@ -154,6 +159,15 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   # a Ping on this already closed port would only manufacture a write failure.
   defp outbound_ping_allowed?,
     do: is_nil(WebsocketDownstreamWriteWatch.failure()) and not WebsocketDownstreamWriteWatch.closed_before_latest_write_read?()
+
+  defp collecting_compaction?(state) do
+    state
+    |> Map.get(:response_task_compaction_collectors, MapSet.new())
+    |> Enum.any?(fn pid ->
+      MapSet.member?(Map.get(state, :tasks, MapSet.new()), pid) and
+        is_nil(downstream_delivery_evidence(state, pid).terminal_class)
+    end)
+  end
 
   defp initialize_socket(state) do
     started_at = System.monotonic_time(:millisecond)
@@ -434,10 +448,18 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
       Enum.each(progressed_tasks(delivered_frames, previous_frames), &DownstreamProgress.notify/1)
     end
 
-    if outbound_ping_allowed?() and Enum.any?(delivered_frames, fn {task, frames} -> frames > max(Map.get(previous_frames, task, 0), 1) end) do
-      {:push, {:ping, ""}, state}
-    else
-      {:ok, state}
+    cond do
+      not outbound_ping_allowed?() ->
+        {:ok, state}
+
+      collecting_compaction?(state) ->
+        {:push, [{:ping, ""}, {:text, ~s({"type":"keepalive"})}], state}
+
+      Enum.any?(delivered_frames, fn {task, frames} -> frames > max(Map.get(previous_frames, task, 0), 1) end) ->
+        {:push, {:ping, ""}, state}
+
+      true ->
+        {:ok, state}
     end
   end
 
