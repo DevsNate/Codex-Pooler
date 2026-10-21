@@ -612,6 +612,13 @@ defmodule CodexPoolerWeb.Admin.PoolListComponents do
             </span>
           </span>
         </div>
+        <span
+          :if={@pool_row.histogram_state == :ready && !@traffic_histogram_card.empty?}
+          id={"pool-row-#{@pool_row.pool.id}-traffic-histogram-description"}
+          class="sr-only"
+        >
+          {@traffic_histogram_card.aria_label}
+        </span>
         <div
           :if={@pool_row.histogram_state == :ready && !@traffic_histogram_card.empty?}
           id={"pool-row-#{@pool_row.pool.id}-traffic-histogram-plot"}
@@ -619,7 +626,7 @@ defmodule CodexPoolerWeb.Admin.PoolListComponents do
           phx-hook="ApexTimeSeriesChart"
           phx-update="ignore"
           role="img"
-          aria-label={@traffic_histogram_card.aria_label}
+          aria-labelledby={"pool-row-#{@pool_row.pool.id}-traffic-histogram-description"}
           data-chart-categories={@traffic_histogram_card.categories}
           data-chart-series={@traffic_histogram_card.series}
           data-chart-units={@traffic_histogram_card.units}

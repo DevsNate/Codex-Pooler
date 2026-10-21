@@ -1255,6 +1255,42 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
     refute has_element?(view, "#pool-row-#{pool.id} [phx-hook='QuotaPressureChart']")
   end
 
+  @tag :pool_chart_accessibility
+  test "pool chart accessible name tracks refreshed totals and window outside the ignored plot", %{conn: conn, scope: scope} do
+    {:ok, pool} = Pools.create_pool(scope, %{slug: "accessible-chart", name: "Accessible Chart"})
+    %{api_key: api_key} = api_key_fixture(pool)
+    %{assignment: assignment} = upstream_assignment_fixture(pool)
+    recent_at = DateTime.add(DateTime.utc_now(), -5, :minute)
+    plot_id = "pool-row-#{pool.id}-traffic-histogram-plot"
+    description_id = "pool-row-#{pool.id}-traffic-histogram-description"
+
+    {:ok, view, _html} = live(conn, ~p"/admin/pools?traffic_window=1h")
+    _ = await_pool_traffic(view)
+    refute has_element?(view, "##{plot_id}")
+    refute has_element?(view, "##{description_id}")
+
+    insert_timed_usage!(pool, api_key, assignment, recent_at, 30, 30, 100)
+    _ = expire_pool_traffic_cooldown(view)
+    send(view.pid, :fallback_refresh_pool_traffic)
+    _ = await_pool_traffic(view)
+    assert_pool_chart_name(view, pool, "Traffic in the last 1h: 30 tokens and 1 request")
+
+    insert_timed_usage!(pool, api_key, assignment, recent_at, 70, 70, 100)
+    _ = expire_pool_traffic_cooldown(view)
+    send(view.pid, :fallback_refresh_pool_traffic)
+    _ = await_pool_traffic(view)
+    assert_pool_chart_name(view, pool, "Traffic in the last 1h: 100 tokens and 2 requests")
+
+    insert_timed_usage!(pool, api_key, assignment, DateTime.add(recent_at, -2, :hour), 200, 200, 100)
+    view |> element("#pool-traffic-window-filter [data-window='5h']") |> render_click()
+    _ = await_pool_traffic(view)
+    assert_pool_chart_name(view, pool, "Traffic in the last 5h: 300 tokens and 3 requests")
+
+    render_hook(view, "set_pool_traffic_visibility", %{"pool_id" => pool.id, "visible" => false})
+    refute has_element?(view, "##{plot_id}")
+    refute has_element?(view, "##{description_id}")
+  end
+
   @tag :pool_partial_hour
   test "renders the first partial hour in pool chart header totals and chart series", %{scope: scope} do
     {:ok, pool} = Pools.create_pool(scope, %{slug: "partial-hour-chart", name: "Partial Hour Chart"})
@@ -1292,7 +1328,9 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
     assert document |> LazyHTML.query("#pool-row-#{pool.id}-request-count") |> LazyHTML.text() |> String.trim() == "2"
     assert Enum.find(series, &(&1["name"] == "Tokens"))["data"] == [30, 70]
     assert Enum.find(series, &(&1["name"] == "Requests"))["data"] == [1, 1]
-    assert document |> LazyHTML.query(plot_selector) |> LazyHTML.attribute("aria-label") == ["Traffic in the last 1h: 100 tokens and 2 requests"]
+    assert document |> LazyHTML.query(plot_selector) |> LazyHTML.attribute("aria-label") == []
+    assert document |> LazyHTML.query(plot_selector) |> LazyHTML.attribute("aria-labelledby") == ["pool-row-#{pool.id}-traffic-histogram-description"]
+    assert document |> LazyHTML.query("#pool-row-#{pool.id}-traffic-histogram-description") |> LazyHTML.text() |> String.trim() == "Traffic in the last 1h: 100 tokens and 2 requests"
   end
 
   test "renders default-window pool usage KPIs from settled usage", %{
@@ -5530,6 +5568,17 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
       quota_family: "account",
       freshness_state: "fresh"
     }
+  end
+
+  defp assert_pool_chart_name(view, pool, expected) do
+    plot_id = "pool-row-#{pool.id}-traffic-histogram-plot"
+    description_id = "pool-row-#{pool.id}-traffic-histogram-description"
+
+    assert has_element?(view, "##{plot_id}[phx-hook='ApexTimeSeriesChart'][phx-update='ignore'][role='img'][aria-labelledby='#{description_id}']")
+    refute has_element?(view, "##{plot_id}[aria-label]")
+    refute has_element?(view, "[phx-update='ignore'] ##{description_id}")
+    assert has_element?(view, "##{description_id}.sr-only", expected)
+    assert view |> element("##{description_id}") |> render() |> LazyHTML.from_fragment() |> LazyHTML.text() |> String.trim() == expected
   end
 
   defp insert_timed_usage!(pool, api_key, assignment, timestamp, tokens, cost_micros, latency_ms) do
