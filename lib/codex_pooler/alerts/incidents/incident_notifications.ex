@@ -278,13 +278,11 @@ defmodule CodexPooler.Alerts.Incidents.IncidentNotifications do
     do: from(incident in query, where: incident.state == ^state)
 
   defp transition_incident(%Scope{} = scope, incident_or_id, action) do
-    with %AlertIncident{} = incident <- normalize_incident(incident_or_id),
-         {:ok, pool_ids} <- Authorization.authorized_pool_filter(scope, nil),
-         true <- incident_visible?(incident, pool_ids) do
-      update_incident_transition(scope, incident, pool_ids, action)
+    with {:ok, incident_id} <- incident_id(incident_or_id),
+         {:ok, pool_ids} <- Authorization.authorized_pool_filter(scope, nil) do
+      update_incident_transition(scope, incident_id, pool_ids, action)
     else
-      nil -> {:error, incident_not_found_error()}
-      false -> {:error, incident_not_found_error()}
+      {:error, :alert_incident_id_required} -> {:error, incident_not_found_error()}
       {:error, _reason} = error -> error
     end
   end
@@ -389,26 +387,54 @@ defmodule CodexPooler.Alerts.Incidents.IncidentNotifications do
   defp incident_not_found_error,
     do: Authorization.access_error(:incident_not_found, "alert incident was not found")
 
-  defp update_incident_transition(scope, incident, pool_ids, action) do
+  defp update_incident_transition(scope, incident_id, pool_ids, action) do
     attrs = incident_transition_attrs(action, now())
 
-    Repo.transaction(fn ->
-      update_incident_transition_in_transaction(incident, attrs, pool_ids)
-    end)
-    |> AlertAudit.audit_incident_transition(scope, incident, action)
-    |> maybe_broadcast_incident_projection_invalidation()
-  end
+    case Repo.transaction(fn ->
+           update_incident_transition_in_transaction(incident_id, attrs, pool_ids, action)
+         end) do
+      {:ok, {projection, previous_incident}} ->
+        {:ok, projection}
+        |> AlertAudit.audit_incident_transition(scope, previous_incident, action)
+        |> maybe_broadcast_incident_projection_invalidation()
 
-  defp update_incident_transition_in_transaction(incident, attrs, pool_ids) do
-    case incident |> AlertIncident.changeset(attrs) |> Repo.update() do
-      {:ok, updated_incident} -> incident_projection(updated_incident, pool_ids)
-      {:error, reason} -> Repo.rollback(reason)
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
-  defp normalize_incident(%AlertIncident{} = incident), do: incident
-  defp normalize_incident(id) when is_binary(id), do: Repo.get(AlertIncident, id)
-  defp normalize_incident(_id), do: nil
+  defp update_incident_transition_in_transaction(incident_id, attrs, pool_ids, action) do
+    incident =
+      Repo.one(
+        from incident in AlertIncident,
+          where: incident.id == ^incident_id,
+          lock: "FOR UPDATE"
+      )
+
+    cond do
+      is_nil(incident) ->
+        Repo.rollback(incident_not_found_error())
+
+      not incident_visible?(incident, pool_ids) ->
+        Repo.rollback(incident_not_found_error())
+
+      not valid_transition?(incident.state, action) ->
+        Repo.rollback(invalid_transition_error())
+
+      true ->
+        case incident |> AlertIncident.changeset(attrs) |> Repo.update() do
+          {:ok, updated_incident} -> {incident_projection(updated_incident, pool_ids), incident}
+          {:error, reason} -> Repo.rollback(reason)
+        end
+    end
+  end
+
+  defp valid_transition?("open", :acknowledge), do: true
+  defp valid_transition?(state, :resolve) when state in ["open", "acknowledged"], do: true
+  defp valid_transition?(_state, _action), do: false
+
+  defp invalid_transition_error,
+    do: Authorization.access_error(:invalid_transition, "alert incident transition is invalid")
 
   defp incident_transition_attrs(:acknowledge, timestamp),
     do: %{state: "acknowledged", acknowledged_at: timestamp, updated_at: timestamp}
