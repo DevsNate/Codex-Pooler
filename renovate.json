@@ -3,6 +3,9 @@
   "extends": [
     "config:recommended"
   ],
+  "ignorePresets": [
+    ":semanticPrefixFixDepsChoreOthers"
+  ],
   "dependencyDashboard": true,
   "enabledManagers": [
     "custom.regex",
@@ -17,7 +20,7 @@
   ],
   "constraints": {
     "elixir": "1.20.4",
-    "erlang": "29.1.1.0",
+    "erlang": "29.1.2.0",
     "node": ">=26 <27"
   },
   "labels": [
@@ -25,8 +28,8 @@
   ],
   "platformAutomerge": false,
   "semanticCommits": "enabled",
-  "semanticCommitType": "chore",
-  "semanticCommitScope": "deps",
+  "semanticCommitType": "deps",
+  "semanticCommitScope": "",
   "prConcurrentLimit": 10,
   "prHourlyLimit": 0,
   "rangeStrategy": "bump",
@@ -170,10 +173,10 @@
       "allowedVersions": "<2"
     },
     {
-      "description": "Classify dependency version updates as maintenance rather than product fixes",
+      "description": "Use the dependency changelog section for dependency updates",
       "matchPackageNames": ["*"],
-      "semanticCommitType": "chore",
-      "semanticCommitScope": "deps"
+      "semanticCommitType": "deps",
+      "semanticCommitScope": ""
     }
   ],
   "customManagers": [
@@ -264,6 +267,19 @@
       "depNameTemplate": "containerbase/erlang-prebuild",
       "datasourceTemplate": "github-releases",
       "versioningTemplate": "semver-coerced"
+    },
+    {
+      "customType": "regex",
+      "description": "Update esbuild binary version used by the Phoenix Mix task",
+      "managerFilePatterns": [
+        "/(^|/)config/config\\.exs$/"
+      ],
+      "matchStrings": [
+        "config :esbuild,[\\s\\S]*?version: \"(?<currentValue>[^\"]+)\""
+      ],
+      "depNameTemplate": "evanw/esbuild",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v(?<version>.*)$"
     },
     {
       "customType": "regex",

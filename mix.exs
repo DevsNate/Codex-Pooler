@@ -61,13 +61,13 @@ defmodule CodexPooler.MixProject do
   defp deps do
     [
       {:argon2_elixir, "== 4.1.3"},
-      {:phoenix, "== 1.8.15"},
+      {:phoenix, "== 1.8.16"},
       {:phoenix_ecto, "== 4.7.0"},
       {:ecto_sql, "== 3.14.0"},
       {:postgrex, "== 0.22.4"},
       {:phoenix_html, "== 4.3.0"},
       {:phoenix_live_reload, "== 1.7.0", only: :dev},
-      {:phoenix_live_view, "== 1.2.12"},
+      {:phoenix_live_view, "== 1.2.13"},
       {:lazy_html, "== 0.1.13", only: :test},
       {:oban, "== 2.24.2"},
       {:phoenix_live_dashboard, "== 0.9.1", only: :dev},
