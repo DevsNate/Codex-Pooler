@@ -15,6 +15,7 @@ defmodule CodexPooler.Gateway.Websocket.DownstreamSessionTest do
   alias CodexPooler.Gateway.Websocket, as: Gateway
   alias CodexPooler.Gateway.Websocket.DownstreamSession
   alias CodexPooler.Repo
+  alias CodexPoolerWeb.CodexResponsesSocket
 
   @remote_node :"codex_pooler@remote-detach-owner.example"
 
@@ -178,6 +179,94 @@ defmodule CodexPooler.Gateway.Websocket.DownstreamSessionTest do
     assert Repo.get!(CodexTurn, turn.turn.id).status == "in_progress"
     assert Repo.get!(CodexSession, fixture.session.id).owner_lease_token == replacement_token
   end
+
+  for changed <- [:session, :owner_instance, :lease] do
+    @tag owner_drain_generation: true
+    test "a changed #{changed} does not inherit the previous owner's drain on a real crash", fixture do
+      runtime = local_owner_runtime(fixture)
+
+      previous =
+        fixture.state
+        |> Map.merge(runtime)
+        |> Map.put(:websocket_owner_drain_observed?, true)
+        |> previous_owner_identity(unquote(changed))
+
+      state = DownstreamSession.put_runtime(previous, runtime)
+      owner = fixture.owner_pid
+      monitor = state.websocket_owner_monitor
+      assert state.websocket_owner_pid == owner
+
+      Process.exit(owner, :kill)
+      assert_receive {:DOWN, ^monitor, :process, ^owner, :killed}
+
+      assert {:stop, {1011, "websocket owner crashed"}, stopped} =
+               DownstreamSession.handle_monitor_down(state, owner, :killed)
+
+      refute Map.has_key?(stopped, :websocket_owner_drain_observed?)
+      assert Repo.get!(BridgeOwnerLease, fixture.owner_lease.id).metadata["release_reason"] == "owner_crashed"
+    end
+  end
+
+  @tag owner_drain_generation: true
+  test "rebinding the same owner preserves its drain announcement through an abnormal exit", fixture do
+    runtime = local_owner_runtime(fixture)
+
+    previous =
+      fixture.state
+      |> Map.merge(runtime)
+      |> Map.put(:websocket_owner_drain_observed?, true)
+
+    rebound = update_in(runtime.websocket_owner_downstream.epoch, &(&1 + 1))
+    state = DownstreamSession.put_runtime(previous, rebound)
+    owner = fixture.owner_pid
+    monitor = state.websocket_owner_monitor
+
+    Process.exit(owner, :kill)
+    assert_receive {:DOWN, ^monitor, :process, ^owner, :killed}
+
+    assert {:ok, lost} = DownstreamSession.handle_monitor_down(state, owner, :killed)
+    assert lost.websocket_owner_drain_observed?
+    assert lost.websocket_owner_lost?
+    assert Repo.get!(BridgeOwnerLease, fixture.owner_lease.id).metadata["release_reason"] == "owner_drained"
+  end
+
+  @tag owner_drain_generation: true
+  test "a replacement owner's native task error is delivered after an earlier drain", fixture do
+    runtime = local_owner_runtime(fixture)
+
+    previous =
+      fixture.state
+      |> Map.merge(runtime)
+      |> Map.merge(%{auth: nil, tasks: MapSet.new([self()]), queued_response_payloads: :queue.new()})
+      |> Map.put(:websocket_owner_drain_observed?, true)
+      |> previous_owner_identity(:lease)
+
+    state = DownstreamSession.put_runtime(previous, runtime)
+    error = %{status: 503, code: "owner_unavailable", message: "websocket owner is unavailable", param: nil}
+
+    assert {:push, {:text, frame}, finished} =
+             CodexResponsesSocket.handle_info({:codex_response_done, self(), {:error, error}}, state)
+
+    assert CodexPooler.JSON.decode!(frame)["error"]["code"] == "owner_unavailable"
+    assert MapSet.size(finished.tasks) == 0
+  end
+
+  defp local_owner_runtime(fixture) do
+    %{
+      codex_session: fixture.session,
+      websocket_owner_lease_token: fixture.session.owner_lease_token,
+      websocket_owner_downstream: fixture.state.websocket_owner_downstream
+    }
+  end
+
+  defp previous_owner_identity(state, :session),
+    do: put_in(state.codex_session.id, Ecto.UUID.generate())
+
+  defp previous_owner_identity(state, :owner_instance),
+    do: put_in(state.codex_session.owner_instance_id, Atom.to_string(@remote_node))
+
+  defp previous_owner_identity(state, :lease),
+    do: Map.put(state, :websocket_owner_lease_token, Ecto.UUID.generate())
 
   # The socket of an owner killed by a new socket's reuse check sees the crash
   # after that socket's takeover released the owner's lease (findings#270 row

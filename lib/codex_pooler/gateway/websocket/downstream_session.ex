@@ -39,6 +39,7 @@ defmodule CodexPooler.Gateway.Websocket.DownstreamSession do
         } = runtime
       ) do
     state
+    |> reset_replaced_owner_drain(runtime)
     |> Map.delete(:websocket_owner_cleanup_witness)
     |> Map.delete(:websocket_owner_cleanup_task)
     |> Map.delete(:websocket_owner_lost?)
@@ -51,6 +52,23 @@ defmodule CodexPooler.Gateway.Websocket.DownstreamSession do
     )
     |> put_monitor(session)
   end
+
+  # A drain announcement belongs to its owner lease, not the socket. A new
+  # downstream binding on the same owner must still recognize that owner's
+  # announced drain if its final DOWN is abnormal.
+  defp reset_replaced_owner_drain(state, runtime) do
+    if owner_identity(state) == owner_identity(runtime),
+      do: state,
+      else: Map.delete(state, :websocket_owner_drain_observed?)
+  end
+
+  defp owner_identity(%{
+         codex_session: %{id: session_id, owner_instance_id: owner_instance_id},
+         websocket_owner_lease_token: lease_token
+       }),
+       do: {session_id, owner_instance_id, lease_token}
+
+  defp owner_identity(_state), do: nil
 
   @spec accept_cleanup_witness(term(), socket_state()) :: socket_state()
   def accept_cleanup_witness(
