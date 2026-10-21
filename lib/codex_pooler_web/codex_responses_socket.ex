@@ -1714,10 +1714,36 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   # `clear_pending_owner_handoff/3` cannot return a push from where they run.
   defp close_if_revoked_idle(result) do
     result
+    |> retire_aborted_public_turn_result()
     |> flush_discarded_submissions()
     |> close_revoked_socket_result()
     |> close_upstream_closed_socket_result()
     |> close_owner_exited_socket_result()
+  end
+
+  defp retire_aborted_public_turn_result({:ok, state}),
+    do: {:ok, maybe_retire_aborted_public_turn(state)}
+
+  defp retire_aborted_public_turn_result({:push, frames, state}),
+    do: {:push, frames, maybe_retire_aborted_public_turn(state)}
+
+  defp retire_aborted_public_turn_result(result), do: result
+
+  # Keep the aborted task as a tombstone while either its work or its owner
+  # can still answer. Once both are gone, PID/binding checks reject their late
+  # messages and the public socket can accept a new turn. Retirement must run
+  # for both signal orders, including delivery completion after owner DOWN.
+  defp maybe_retire_aborted_public_turn(state) do
+    if public_owner_turn_open?(state) and public_turn_aborted?(state) and
+         Adapter.owner_lost?(state) and not active_response_task?(state) do
+      state = clear_finished_public_turn(state)
+
+      if not socket_revoked?(state) and not :queue.is_empty(Map.get(state, :queued_response_payloads, :queue.new())),
+        do: state |> maybe_recover_lost_owner() |> maybe_start_queued_response_task(),
+        else: state
+    else
+      state
+    end
   end
 
   defp flush_discarded_submissions({:ok, state}) do
@@ -2622,6 +2648,12 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   defp reopen_public_owner_attempt(state), do: Map.put(state, :public_turn_owner_complete?, false)
 
   defp finish_public_turn(state) do
+    state
+    |> clear_finished_public_turn()
+    |> maybe_start_queued_response_task()
+  end
+
+  defp clear_finished_public_turn(state) do
     task_pid = Map.get(state, :public_response_task_pid)
 
     state
@@ -2634,7 +2666,6 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
     |> Map.put(:public_turn_aborted?, false)
     |> Map.put(:public_turn_output_committed?, false)
     |> schedule_response_task_delivery(task_pid)
-    |> maybe_start_queued_response_task()
   end
 
   defp active_public_turn?(state, pid) when is_pid(pid) do

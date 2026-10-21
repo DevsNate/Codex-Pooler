@@ -32,6 +32,11 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerLossT
     :ok
   end
 
+  @tag active_owner_drain_recovery: true
+  test "public active drain refuses queued work, serves a fresh turn and closes on the successor crash" do
+    Scenario.assert_active_public_drain_recovery!()
+  end
+
   for loss <- [:owner_drained, :owner_stopped] do
     @tag loss: loss
     test "native: after its owner #{loss}, the idle socket closes 1001 and the client's new socket is served", ctx do

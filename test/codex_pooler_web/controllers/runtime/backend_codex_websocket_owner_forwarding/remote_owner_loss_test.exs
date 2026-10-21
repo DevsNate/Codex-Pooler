@@ -42,6 +42,11 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RemoteOwne
     :ok
   end
 
+  @tag active_owner_drain_recovery: true
+  test "public peer-owner active drain recovers locally and closes on the successor crash", ctx do
+    Scenario.assert_active_public_drain_recovery!(ctx.peer_node)
+  end
+
   for loss <- [:owner_drained, :owner_stopped] do
     @tag loss: loss
     test "native: after its remote owner #{loss}, the idle socket closes 1001 and the client's new socket takes the session over to this node", ctx do

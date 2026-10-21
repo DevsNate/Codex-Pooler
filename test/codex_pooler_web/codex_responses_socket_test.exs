@@ -2820,12 +2820,85 @@ defmodule CodexPoolerWeb.CodexResponsesSocketTest do
 
       refute Map.has_key?(down_state, :websocket_owner_pid)
       refute Map.has_key?(down_state, :websocket_owner_monitor)
-      assert down_state.public_turn_aborted?
+      refute down_state.public_turn_aborted?
       assert :queue.len(down_state.queued_response_payloads) == 0
       assert MapSet.size(down_state.tasks) == 0
-      assert down_state.public_response_task_pid == task_pid
+      assert down_state.public_response_task_pid == nil
+
+      assert {:ok, ^down_state} = CodexResponsesSocket.handle_info(drain_frame, down_state)
+      assert {:ok, ^down_state} = CodexResponsesSocket.handle_info(complete, down_state)
+      assert {:ok, ^down_state} = CodexResponsesSocket.handle_info({:codex_response_done, task_pid, {:error, :owner_drained}}, down_state)
     end
   end
+
+  for first <- [:owner, :task], completion <- [:done, :down], revoked? <- [false, true] do
+    @tag active_owner_drain_recovery: true
+    test "aborted public turn retires with #{first} first, task #{completion}, revoked #{revoked?}" do
+      task = owner_turn_pid()
+      owner = owner_turn_pid()
+      on_exit(fn -> send(task, :stop) end)
+      on_exit(fn -> send(owner, :stop) end)
+      task_monitor = Process.monitor(task)
+      owner_monitor = Process.monitor(owner)
+
+      state =
+        public_turn_state(task, %{
+          auth: nil,
+          task_monitors: %{task => task_monitor},
+          websocket_owner_pid: owner,
+          websocket_owner_monitor: owner_monitor,
+          websocket_owner_downstream: %{pid: self(), epoch: 17, correlation_id: "corr-aborted-retirement"},
+          api_key_revoked?: unquote(revoked?),
+          api_key_close_sent?: false
+        })
+
+      {:ok, payload} = WebsocketOwnerContract.safe_error_payload(:owner_drained, nil)
+      drain = {:websocket_owner_frame, "corr-aborted-retirement", 17, task, {:error, :owner_drained, payload}}
+      assert {:push, {:text, _error}, aborted} = CodexResponsesSocket.handle_info(drain, state)
+      assert aborted.public_turn_aborted?
+
+      signals = if unquote(first) == :owner, do: [:owner, :task], else: [:task, :owner]
+      [first_signal, second_signal] = signals
+
+      assert {:ok, waiting} = aborted_public_signal(first_signal, unquote(completion), aborted, task, task_monitor, owner, owner_monitor)
+      assert waiting.public_response_task_pid == task
+      assert waiting.public_turn_aborted?
+
+      result = aborted_public_signal(second_signal, unquote(completion), waiting, task, task_monitor, owner, owner_monitor)
+
+      retired =
+        if unquote(revoked?) do
+          assert {:stop, :normal, @api_key_revocation_close, retired} = result
+          assert retired.api_key_close_sent?
+          retired
+        else
+          assert {:ok, retired} = result
+          retired
+        end
+
+      assert retired.public_response_task_pid == nil
+      refute retired.public_turn_aborted?
+      assert MapSet.size(retired.tasks) == 0
+      assert {:ok, ^retired} = CodexResponsesSocket.handle_info(drain, retired)
+      assert {:ok, ^retired} = CodexResponsesSocket.handle_info({:codex_response_done, task, {:error, :owner_drained}}, retired)
+    end
+  end
+
+  defp aborted_public_signal(:owner, _completion, state, _task, _task_monitor, owner, monitor) do
+    send(owner, :stop)
+    assert_receive {:DOWN, ^monitor, :process, ^owner, :normal}
+    {result, logs} = ExUnit.CaptureLog.with_log(fn -> CodexResponsesSocket.handle_info({:DOWN, monitor, :process, owner, :normal}, state) end)
+    assert logs =~ "failure_reason=owner_unavailable"
+    result
+  end
+
+  defp aborted_public_signal(:task, :down, state, task, monitor, _owner, _owner_monitor) do
+    assert_receive {:DOWN, ^monitor, :process, ^task, {:shutdown, :owner_drained}}
+    CodexResponsesSocket.handle_info({:DOWN, monitor, :process, task, {:shutdown, :owner_drained}}, state)
+  end
+
+  defp aborted_public_signal(:task, :done, state, task, _task_monitor, _owner, _owner_monitor),
+    do: CodexResponsesSocket.handle_info({:codex_response_done, task, {:error, :owner_drained}}, state)
 
   test "websocket error frames carry pinned continuation recovery fields" do
     {_result, logs} =
