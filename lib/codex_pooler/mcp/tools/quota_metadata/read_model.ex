@@ -9,6 +9,7 @@ defmodule CodexPooler.MCP.Tools.QuotaMetadata.ReadModel do
   alias CodexPooler.Upstreams.Assignments, as: UpstreamAssignments
   alias CodexPooler.Upstreams.Quota
   alias CodexPooler.Upstreams.Quota.RoutingQuotaSnapshot
+  alias CodexPooler.Upstreams.SavedResets
   alias CodexPooler.Upstreams.Schemas.UpstreamIdentity
 
   @default_limit 50
@@ -126,6 +127,7 @@ defmodule CodexPooler.MCP.Tools.QuotaMetadata.ReadModel do
       plan_family: present_string(identity.plan_family),
       assignment_summary: assignment_summary(identity, visible_pool_ids),
       quota_summary: quota_summary(snapshot, all_windows),
+      saved_resets: PrivacyMatrix.project!(:upstream_quotas, %{saved_resets: SavedResets.snapshot(identity, timestamp)}).saved_resets,
       quota_windows: returned_windows
     }
   end

@@ -60,6 +60,54 @@ defmodule CodexPooler.MCP.QuotaMetadataTest do
     %{auth: auth, owner: owner, scope: scope}
   end
 
+  test "quota tools expose only recorded saved-reset summary without changing metadata", %{auth: auth} do
+    pool = pool_fixture(%{name: "Saved reset MCP"})
+    observed_at = "2026-10-18T12:00:00Z"
+
+    for {status, count, expected} <- [
+          {"reported", 3, 3},
+          {"reported", 0, 0},
+          {"unreported", 7, nil},
+          {"unavailable", 7, nil}
+        ] do
+      metadata = %{
+        "saved_resets" => %{
+          "status" => status,
+          "available_count" => count,
+          "observed_at" => observed_at,
+          "credit_id" => "private-credit-id",
+          "provider_json" => "private-provider-payload"
+        }
+      }
+
+      %{identity: identity} = upstream_assignment_fixture(pool, %{identity_metadata: metadata})
+
+      assert {:ok, detail} =
+               ToolDispatch.call(
+                 "codex_pooler_get_upstream_quota",
+                 %{"selector" => identity.id},
+                 %{auth: auth}
+               )
+
+      summary = detail["structuredContent"]["item"]["saved_resets"]
+      assert summary == %{"status" => status, "available_count" => expected, "observed_at" => observed_at}
+
+      assert {:ok, list} =
+               ToolDispatch.call(
+                 "codex_pooler_list_upstream_quotas",
+                 %{"pool_id" => pool.id},
+                 %{auth: auth}
+               )
+
+      item = Enum.find(list["structuredContent"]["items"], &(&1["id"] == identity.id))
+      assert item["saved_resets"] == summary
+      refute inspect(detail) =~ "private-credit-id"
+      refute inspect(list) =~ "private-provider-payload"
+      assert :ok = Redaction.assert_mcp_output_safe!(detail)
+      assert Repo.reload!(identity).metadata == identity.metadata
+    end
+  end
+
   test "read model maps fresh account and model quota windows", %{scope: scope} do
     pool = pool_fixture(%{name: "Quota DTO Pool"})
 
@@ -116,6 +164,7 @@ defmodule CodexPooler.MCP.QuotaMetadataTest do
     assert account.workspace_label == "Quota alpha"
     assert account.status == "active"
     assert account.plan_family == "team"
+    assert account.saved_resets == %{status: "unreported", available_count: nil, observed_at: nil}
 
     assert account.assignment_summary == %{
              count: 1,
