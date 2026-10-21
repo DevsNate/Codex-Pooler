@@ -7,9 +7,12 @@ on:
       - '.github/workflows/release-policy.yml'
       - 'scripts/verification/release-publish-guard.mjs'
       - 'scripts/verification/release-publish-trigger.mjs'
+      - 'scripts/verification/container-identity.mjs'
+      - 'Dockerfile'
       - 'test/scripts/release_publish_guard_test.mjs'
       - 'test/scripts/release_publish_trigger_test.mjs'
       - 'test/scripts/release_publish_workflow_test.mjs'
+      - 'test/scripts/container_identity_contract_test.mjs'
       - 'test/scripts/support/**'
       - 'assets/js/*.mjs'
   pull_request:
@@ -18,9 +21,12 @@ on:
       - '.github/workflows/release-policy.yml'
       - 'scripts/verification/release-publish-guard.mjs'
       - 'scripts/verification/release-publish-trigger.mjs'
+      - 'scripts/verification/container-identity.mjs'
+      - 'Dockerfile'
       - 'test/scripts/release_publish_guard_test.mjs'
       - 'test/scripts/release_publish_trigger_test.mjs'
       - 'test/scripts/release_publish_workflow_test.mjs'
+      - 'test/scripts/container_identity_contract_test.mjs'
       - 'test/scripts/support/**'
       - 'assets/js/*.mjs'
 
@@ -32,4 +38,4 @@ jobs:
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
-      - run: node --test test/scripts/release_publish_*_test.mjs assets/js/*_test.mjs
+      - run: node --test test/scripts/*_test.mjs assets/js/*_test.mjs
