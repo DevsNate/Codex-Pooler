@@ -41,6 +41,7 @@ defmodule CodexPoolerWeb.Admin.StatsLive do
        stats_dashboard_generation: 0,
        stats_dashboard_running?: false,
        stats_dashboard_rerun?: false,
+       stats_dashboard_reason: :explicit,
        stats_dashboard_preparation: nil
      )
      |> NotificationCenterHooks.follow_viewer_visibility()}
@@ -130,35 +131,27 @@ defmodule CodexPoolerWeb.Admin.StatsLive do
   defp reload_stats_dashboard(socket) do
     notify_stats_reload(:executed, socket.assigns.current_params)
 
-    {:noreply, request_stats_dashboard(socket, socket.assigns.current_params)}
+    {:noreply, request_stats_dashboard(socket, socket.assigns.current_params, :automatic)}
   end
 
   @impl true
-  def handle_async({:stats_dashboard, generation}, {:ok, result}, socket) do
+  def handle_async({:stats_dashboard, generation, reason}, {:ok, result}, socket) do
     socket = assign(socket, :stats_dashboard_running?, false)
 
-    if generation == socket.assigns.stats_dashboard_generation do
-      {:noreply, apply_stats_dashboard_result(socket, result)}
-    else
-      {:noreply, maybe_start_pending_stats_dashboard(socket)}
+    cond do
+      generation != socket.assigns.stats_dashboard_generation ->
+        {:noreply, maybe_start_pending_stats_dashboard(socket)}
+
+      reason == :automatic and LiveUpdatesHooks.paused?(socket) ->
+        {:noreply, hold_stats_dashboard(socket)}
+
+      true ->
+        {:noreply, apply_stats_dashboard_result(socket, result)}
     end
   end
 
-  def handle_async({:stats_dashboard, generation}, {:exit, _reason}, socket) do
-    socket = assign(socket, :stats_dashboard_running?, false)
-
-    if generation == socket.assigns.stats_dashboard_generation do
-      {:noreply,
-       socket
-       |> assign(
-         dashboard: nil,
-         dashboard_loading?: false,
-         filter_error: %{code: :load_failed, message: "statistics could not be loaded"}
-       )
-       |> maybe_start_pending_stats_dashboard()}
-    else
-      {:noreply, maybe_start_pending_stats_dashboard(socket)}
-    end
+  def handle_async({:stats_dashboard, generation, reason}, {:exit, _reason}, socket) do
+    handle_async({:stats_dashboard, generation, reason}, {:ok, {:error, %{code: :load_failed, message: "statistics could not be loaded"}}}, socket)
   end
 
   @impl true
@@ -292,10 +285,13 @@ defmodule CodexPoolerWeb.Admin.StatsLive do
     """
   end
 
-  defp request_stats_dashboard(socket, params) do
+  defp request_stats_dashboard(socket, params, reason \\ :explicit) do
     filters = stats_filters(params)
     generation = socket.assigns.stats_dashboard_generation + 1
     reset_dashboard? = params != socket.assigns.current_params
+    # An event for the same requested view must not demote a queued filter or
+    # permission refresh while the previous generation is still running.
+    reason = if socket.assigns.stats_dashboard_running? and socket.assigns.stats_dashboard_reason == :explicit, do: :explicit, else: reason
 
     case prepare_dashboard_with_telemetry(socket.assigns.current_scope, filters) do
       {:ok, preparation} ->
@@ -303,6 +299,7 @@ defmodule CodexPoolerWeb.Admin.StatsLive do
         |> assign(
           current_params: params,
           stats_dashboard_generation: generation,
+          stats_dashboard_reason: reason,
           stats_dashboard_preparation: preparation,
           dashboard: if(reset_dashboard?, do: nil, else: socket.assigns.dashboard),
           dashboard_loading?: true,
@@ -379,7 +376,7 @@ defmodule CodexPoolerWeb.Admin.StatsLive do
 
     socket
     |> assign(stats_dashboard_running?: true, stats_dashboard_rerun?: false)
-    |> start_async({:stats_dashboard, generation}, fn ->
+    |> start_async({:stats_dashboard, generation, socket.assigns.stats_dashboard_reason}, fn ->
       build_prepared_dashboard_with_telemetry(preparation)
     end)
   end
@@ -387,10 +384,20 @@ defmodule CodexPoolerWeb.Admin.StatsLive do
   defp maybe_start_pending_stats_dashboard(socket) do
     if socket.assigns.stats_dashboard_rerun? and
          not is_nil(socket.assigns.stats_dashboard_preparation) do
-      start_stats_dashboard(socket, socket.assigns.stats_dashboard_generation)
+      if socket.assigns.stats_dashboard_reason == :automatic and LiveUpdatesHooks.paused?(socket) do
+        hold_stats_dashboard(socket)
+      else
+        start_stats_dashboard(socket, socket.assigns.stats_dashboard_generation)
+      end
     else
       socket
     end
+  end
+
+  defp hold_stats_dashboard(socket) do
+    socket
+    |> assign(dashboard_loading?: false, stats_dashboard_rerun?: false)
+    |> LiveUpdatesHooks.hold()
   end
 
   defp apply_stats_dashboard_result(socket, {:ok, dashboard}) do

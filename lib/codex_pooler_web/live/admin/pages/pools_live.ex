@@ -64,6 +64,8 @@ defmodule CodexPoolerWeb.Admin.PoolsLive do
        pool_traffic_loading?: true,
        pool_traffic_running?: false,
        pool_traffic_rerun?: false,
+       pool_traffic_reason: :explicit,
+       pool_traffic_pending_reason: nil,
        pool_traffic_cooldown_timer: nil,
        pool_traffic_cooldown_token: nil
      )
@@ -532,7 +534,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLive do
   def handle_info({Events, %{pool_id: pool_id, topics: topics}}, socket) do
     case pool_event_kind(topics, pool_id) do
       :model_sync -> {:noreply, reload_model_serving_or_defer(socket, pool_id)}
-      :lifecycle -> {:noreply, reload_pools_or_defer(socket)}
+      :lifecycle -> {:noreply, reload_pools_or_defer(socket, :automatic)}
       :usage -> {:noreply, schedule_pool_traffic_refresh(socket)}
       :ignore -> {:noreply, socket}
     end
@@ -549,7 +551,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLive do
         {:noreply, socket |> clear_pool_traffic_refresh() |> LiveUpdatesHooks.hold()}
 
       true ->
-        {:noreply, socket |> clear_pool_traffic_refresh() |> start_pool_traffic_load()}
+        {:noreply, socket |> clear_pool_traffic_refresh() |> start_pool_traffic_load(:automatic)}
     end
   end
 
@@ -562,7 +564,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLive do
         )
 
       if socket.assigns.pool_traffic_rerun? do
-        {:noreply, start_pool_traffic_load(socket)}
+        {:noreply, start_pool_traffic_load(socket, socket.assigns.pool_traffic_pending_reason || :automatic)}
       else
         {:noreply, socket}
       end
@@ -577,7 +579,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLive do
   # catch up immediately, but the refresh itself stays behind the global gate.
   def handle_info(:fallback_refresh_pool_traffic, socket) do
     schedule_pool_traffic_fallback_refresh()
-    LiveUpdatesHooks.unless_paused(socket, &start_pool_traffic_load/1)
+    LiveUpdatesHooks.unless_paused(socket, &start_pool_traffic_load(&1, :automatic))
   end
 
   # Cancelling the timer, not clearing the refresh: a replayed usage event has
@@ -587,7 +589,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLive do
   # remembered until the dialog closes. Clearing it here dropped the structural
   # reload that deferral was protecting.
   def handle_info(:live_updates_resumed, socket) do
-    {:noreply, socket |> cancel_pool_traffic_refresh_timer() |> start_pool_traffic_load()}
+    {:noreply, socket |> cancel_pool_traffic_refresh_timer() |> start_pool_traffic_load(:automatic)}
   end
 
   # The viewer's role or visible Pools changed while the page is open: a
@@ -638,59 +640,47 @@ defmodule CodexPoolerWeb.Admin.PoolsLive do
 
   @impl true
   def handle_async(:pool_traffic, {:ok, {:ok, traffic, cooldown_ms}}, socket) do
-    socket =
-      socket
-      |> assign(:pool_traffic_running?, false)
-      |> schedule_pool_traffic_load_cooldown(cooldown_ms)
+    complete_pool_traffic(socket, cooldown_ms, fn socket ->
+      if traffic.traffic_window == current_traffic_window(socket) do
+        eligible_ids = eligible_pool_traffic_ids(socket)
+        active_result_ids = MapSet.intersection(traffic.eligible_pool_ids, eligible_ids)
+        usage = filter_pool_traffic_histograms(traffic.usage, active_result_ids)
 
-    if traffic.traffic_window == current_traffic_window(socket) do
-      eligible_ids = eligible_pool_traffic_ids(socket)
-      active_result_ids = MapSet.intersection(traffic.eligible_pool_ids, eligible_ids)
-      usage = filter_pool_traffic_histograms(traffic.usage, active_result_ids)
-
-      socket =
         socket
         |> assign(pool_traffic_usage: usage, pool_traffic_loading?: false)
         |> apply_pool_traffic()
         |> reconcile_pool_histogram_states(:loading)
-
-      {:noreply, socket}
-    else
-      # The traffic window changed while this result was in flight; the stale
-      # aggregate must not merge. Queue the current window behind the same
-      # cooldown that bounds every other completed traffic load.
-      {:noreply, assign(socket, :pool_traffic_rerun?, true)}
-    end
+      else
+        # A newer window request keeps its own reason behind this cooldown.
+        queue_pool_traffic_load(socket, socket.assigns.pool_traffic_reason)
+      end
+    end)
   end
 
   def handle_async(:pool_traffic, {:ok, {:busy, retry_after_ms}}, socket) do
-    {:noreply,
-     socket
-     |> assign(pool_traffic_running?: false, pool_traffic_rerun?: true)
-     |> schedule_pool_traffic_load_cooldown(retry_after_ms)}
+    complete_pool_traffic(socket, retry_after_ms, &queue_pool_traffic_load(&1, &1.assigns.pool_traffic_reason))
   end
 
   def handle_async(:pool_traffic, {:ok, {:error, :stale_owner}}, socket) do
-    {:noreply,
-     socket
-     |> assign(pool_traffic_running?: false, pool_traffic_rerun?: true)
-     |> schedule_pool_traffic_load_cooldown(@pool_traffic_load_cooldown_ms)}
+    complete_pool_traffic(socket, @pool_traffic_load_cooldown_ms, &queue_pool_traffic_load(&1, &1.assigns.pool_traffic_reason))
   end
 
   def handle_async(:pool_traffic, {:ok, {:error, :gate_unavailable}}, socket) do
-    {:noreply,
-     socket
-     |> assign(:pool_traffic_running?, false)
-     |> schedule_pool_traffic_load_cooldown(@pool_traffic_load_cooldown_ms)
-     |> pool_traffic_load_error()}
+    complete_pool_traffic(socket, @pool_traffic_load_cooldown_ms, &pool_traffic_load_error/1)
   end
 
   def handle_async(:pool_traffic, {:exit, _reason}, socket) do
-    {:noreply,
-     socket
-     |> assign(:pool_traffic_running?, false)
-     |> schedule_pool_traffic_load_cooldown(@pool_traffic_load_cooldown_ms)
-     |> pool_traffic_load_error()}
+    complete_pool_traffic(socket, @pool_traffic_load_cooldown_ms, &pool_traffic_load_error/1)
+  end
+
+  defp complete_pool_traffic(socket, cooldown_ms, apply_result) do
+    socket = socket |> assign(:pool_traffic_running?, false) |> schedule_pool_traffic_load_cooldown(cooldown_ms)
+
+    if socket.assigns.pool_traffic_reason == :automatic and LiveUpdatesHooks.paused?(socket) do
+      {:noreply, socket |> assign(:pool_traffic_loading?, false) |> LiveUpdatesHooks.hold()}
+    else
+      {:noreply, apply_result.(socket)}
+    end
   end
 
   defp pool_event_kind(topics, pool_id) when is_list(topics) and is_binary(pool_id) do
@@ -896,16 +886,23 @@ defmodule CodexPoolerWeb.Admin.PoolsLive do
   # would queue clicks and dialog opens behind it. One task at a time, followed
   # by a PostgreSQL-shared operator gate: extra requests in either phase
   # coalesce into a single re-run that reads the latest eligible set.
-  defp start_pool_traffic_load(socket) do
+  defp start_pool_traffic_load(socket, reason \\ :explicit) do
+    reason = pool_traffic_request_reason(socket, reason)
+
     cond do
       not connected?(socket) ->
         socket
 
+      reason == :automatic and LiveUpdatesHooks.paused?(socket) ->
+        socket
+        |> assign(pool_traffic_rerun?: false, pool_traffic_pending_reason: nil)
+        |> LiveUpdatesHooks.hold()
+
       socket.assigns.pool_traffic_running? ->
-        assign(socket, :pool_traffic_rerun?, true)
+        queue_pool_traffic_load(socket, reason)
 
       is_reference(socket.assigns.pool_traffic_cooldown_timer) ->
-        assign(socket, :pool_traffic_rerun?, true)
+        queue_pool_traffic_load(socket, reason)
 
       true ->
         pool_ids = socket.assigns.traffic_pool_ids
@@ -915,7 +912,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLive do
         owner_token = Ecto.UUID.generate()
 
         socket
-        |> assign(pool_traffic_running?: true, pool_traffic_rerun?: false)
+        |> assign(pool_traffic_running?: true, pool_traffic_rerun?: false, pool_traffic_reason: reason, pool_traffic_pending_reason: nil)
         |> reconcile_pool_histogram_states(:loading)
         |> start_async(:pool_traffic, fn ->
           load_pool_traffic(
@@ -927,6 +924,14 @@ defmodule CodexPoolerWeb.Admin.PoolsLive do
           )
         end)
     end
+  end
+
+  defp queue_pool_traffic_load(socket, reason) do
+    assign(socket, pool_traffic_rerun?: true, pool_traffic_pending_reason: pool_traffic_request_reason(socket, reason))
+  end
+
+  defp pool_traffic_request_reason(socket, reason) do
+    if socket.assigns.pool_traffic_pending_reason == :explicit, do: :explicit, else: reason
   end
 
   defp load_pool_traffic(current_scope, owner_token, pool_ids, eligible_pool_ids, traffic_window) do
@@ -1284,7 +1289,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLive do
   # is open: the create/edit checkbox selections live only in the client DOM
   # (submit-only forms), so a re-render reverts un-submitted ticks. Mark the
   # page stale instead and let the dialog-close flush reload it.
-  defp reload_pools_or_defer(socket) do
+  defp reload_pools_or_defer(socket, reason \\ :explicit) do
     if pool_dialog_open?(socket) do
       socket
       |> assign(:pool_traffic_dirty?, true)
@@ -1292,7 +1297,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLive do
     else
       socket
       |> load_structural()
-      |> start_pool_traffic_load()
+      |> start_pool_traffic_load(reason)
     end
   end
 
@@ -1353,7 +1358,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLive do
   end
 
   defp reload_model_serving_or_defer(socket, pool_id) do
-    socket = reload_pools_or_defer(socket)
+    socket = reload_pools_or_defer(socket, :automatic)
 
     case socket.assigns.editing_pool do
       %{id: ^pool_id} = pool ->

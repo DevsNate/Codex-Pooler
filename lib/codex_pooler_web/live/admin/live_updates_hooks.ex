@@ -16,7 +16,7 @@ defmodule CodexPoolerWeb.Admin.LiveUpdatesHooks do
   resume — a full set of mount queries per tab, which is the stampede rather
   than a way to avoid it.
 
-  Two things a caller still owns, because no hook can know them:
+  Three things a caller still owns, because no hook can know them:
 
     * a debounce already in flight when the operator pauses. Pages guard their
       own reload with `paused?/1` and call `hold/1`, or the list moves up to one
@@ -25,6 +25,10 @@ defmodule CodexPoolerWeb.Admin.LiveUpdatesHooks do
       coalesces onto a reference that will never send again.
     * a refresh that is not driven by a Pool event — a fallback timer, or
       another domain's events. Those pass this gate untouched.
+    * an asynchronous read already started before pause, including its error
+      completion and cooldown retry. Pages retain the active and pending
+      request reasons separately: automatic results wait for resume, while
+      explicit navigation, filters, viewport and permission refreshes continue.
 
   Every page that subscribes to Pool events needs a `:live_updates_resumed`
   clause. It arrives when the page held its own reload, and when the gate had to
