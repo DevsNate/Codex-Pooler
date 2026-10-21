@@ -17,6 +17,111 @@ defmodule CodexPooler.Accounting.RequestReplayPostgresTest do
   alias CodexPooler.Repo
   alias Ecto.Adapters.SQL.Sandbox
 
+  test "replay consume permits a reservation holding the policy binding to insert its Pool reference" do
+    fixture = committed_replay_fixture!()
+    observer = start_observer!()
+    supervisor = start_supervised!(Task.Supervisor)
+    parent = self()
+    {:ok, armed} = Sandbox.unboxed_run(Repo, fn -> RequestReplay.arm(arm_input(fixture)) end)
+    input = consume_input(fixture, armed, :crypto.strong_rand_bytes(32))
+    allow_committed_owner(fixture)
+
+    reservation =
+      Task.Supervisor.async_nolink(supervisor, fn ->
+        Sandbox.unboxed_run(Repo, fn ->
+          Repo.transaction(fn ->
+            # This is the same binding that reserve locks before inserting the request.
+            assert [_ | _] = Repo.all(from binding in CodexPooler.Access.APIKeyPolicyBinding, where: binding.api_key_id == ^fixture.api_key.id, lock: "FOR UPDATE")
+            [[backend]] = Repo.query!("SELECT pg_backend_pid()").rows
+            send(parent, {:policy_locked, self(), backend})
+
+            receive do
+              :reserve -> :ok
+            after
+              15_000 -> flunk("reservation barrier expired")
+            end
+
+            Accounting.reserve(fixture.auth, fixture.model, %{"model" => fixture.model.exposed_model_id, "max_output_tokens" => 1}, %{endpoint: "/backend-api/codex/responses", transport: "http_sse", correlation_id: Ecto.UUID.generate()})
+          end)
+        end)
+      end)
+
+    assert_receive {:policy_locked, reservation_pid, reservation_backend}, 15_000
+
+    consumer =
+      Task.Supervisor.async_nolink(supervisor, fn ->
+        Sandbox.unboxed_run(Repo, fn ->
+          [[backend]] = Repo.query!("SELECT pg_backend_pid()").rows
+          send(parent, {:consume_backend, backend})
+          RequestReplay.consume(input)
+        end)
+      end)
+
+    assert_receive {:consume_backend, consumer_backend}, 15_000
+    refute consumer_backend == reservation_backend
+    await_backend_blocked!(observer, consumer_backend, reservation_backend)
+    send(reservation_pid, :reserve)
+
+    assert {:ok, {:ok, _reservation}} = await_lock_task!(reservation)
+    assert {:ok, consumed} = await_lock_task!(consumer)
+    assert consumed.attempt.replay_generation == 1
+
+    Sandbox.unboxed_run(Repo, fn ->
+      assert request_attempt_count(fixture.request.id) == 2
+      assert terminal_ledger_count(fixture.request.id, "settlement") == 0
+      assert terminal_ledger_count(fixture.request.id, "release") == 0
+    end)
+
+    cleanup_fixture(fixture)
+  end
+
+  test "replay consume holds the Pool status fence until its transaction commits" do
+    fixture = committed_replay_fixture!()
+    observer = start_observer!()
+    supervisor = start_supervised!(Task.Supervisor)
+    parent = self()
+    {:ok, armed} = Sandbox.unboxed_run(Repo, fn -> RequestReplay.arm(arm_input(fixture)) end)
+    input = consume_input(fixture, armed, :crypto.strong_rand_bytes(32))
+    allow_committed_owner(fixture)
+
+    consumer =
+      Task.Supervisor.async_nolink(supervisor, fn ->
+        Sandbox.unboxed_run(Repo, fn ->
+          Repo.transaction(fn ->
+            assert {:ok, consumed} = RequestReplay.consume(input)
+            [[backend]] = Repo.query!("SELECT pg_backend_pid()").rows
+            send(parent, {:consume_locked, self(), backend})
+
+            receive do
+              :commit_consume -> consumed
+            after
+              15_000 -> flunk("consume barrier expired")
+            end
+          end)
+        end)
+      end)
+
+    assert_receive {:consume_locked, consumer_pid, consumer_backend}, 15_000
+
+    updater =
+      Task.Supervisor.async_nolink(supervisor, fn ->
+        Sandbox.unboxed_run(Repo, fn ->
+          [[backend]] = Repo.query!("SELECT pg_backend_pid()").rows
+          send(parent, {:update_backend, backend})
+          Repo.update_all(from(pool in Pool, where: pool.id == ^fixture.pool.id), set: [status: "disabled"])
+        end)
+      end)
+
+    assert_receive {:update_backend, updater_backend}, 15_000
+    refute updater_backend == consumer_backend
+    await_backend_blocked!(observer, updater_backend, consumer_backend)
+    send(consumer_pid, :commit_consume)
+    assert {:ok, %{attempt: %{replay_generation: 1}}} = await_lock_task!(consumer)
+    assert {1, nil} = await_lock_task!(updater)
+    assert Sandbox.unboxed_run(Repo, fn -> Repo.get!(Pool, fixture.pool.id).status end) == "disabled"
+    cleanup_fixture(fixture)
+  end
+
   # Each mutation and ordering is its own committed fixture and race, so each is
   # its own test rather than six passes accumulated in one.
   for mutation <- [:pause_api_key, :delete_api_key], order <- [:concurrent, :consume_first, :mutation_first] do
@@ -803,6 +908,14 @@ defmodule CodexPooler.Accounting.RequestReplayPostgresTest do
       true ->
         flunk("consume did not wait on the session lock across expiry")
     end
+  end
+
+  defp await_lock_task!(task) do
+    monitor = Process.monitor(task.pid)
+    result = Task.await(task, 15_000)
+    assert_receive {:DOWN, ^monitor, :process, _, reason}, 15_000
+    assert reason in [:normal, :noproc]
+    result
   end
 
   defp start_observer! do

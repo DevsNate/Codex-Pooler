@@ -2097,8 +2097,9 @@ defmodule CodexPooler.Accounting.RequestReplay do
     )
   end
 
+  # Protect the status read from updates while allowing reservation FK KEY SHARE locks.
   defp lock_pool!(pool_id),
-    do: Repo.one!(from row in CodexPooler.Pools.Pool, where: row.id == ^pool_id, lock: "FOR UPDATE")
+    do: Repo.one!(from row in CodexPooler.Pools.Pool, where: row.id == ^pool_id, lock: "FOR SHARE")
 
   defp lock_api_key_policy_bindings!(api_key_id),
     do:
