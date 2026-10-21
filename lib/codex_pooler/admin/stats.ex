@@ -251,6 +251,7 @@ defmodule CodexPooler.Admin.Stats do
     }
   end
 
+  defp request_bucket_granularity(:one_hour), do: :five_minutes
   defp request_bucket_granularity(:seven_days), do: :day
   defp request_bucket_granularity(_window), do: :hour
 

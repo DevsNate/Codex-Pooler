@@ -597,6 +597,32 @@ defmodule CodexPooler.Accounting.ReportingTest do
     assert row_count == length(result.rows)
   end
 
+  @tag :stats_five_minutes
+  test "one-hour model series reads raw five-minute settlements instead of aligned hourly rollups" do
+    pool = pool_fixture()
+    %{api_key: api_key} = active_api_key_fixture(pool)
+    %{identity: identity, assignment: assignment} = upstream_assignment_fixture(pool)
+    model = model_fixture(pool, %{exposed_model_id: "sample-raw-model"})
+    started_at = ~U[2026-01-10 15:00:00.000000Z]
+    ended_at = ~U[2026-01-10 16:00:00.000000Z]
+
+    for {timestamp, tokens} <- [{DateTime.add(started_at, -1, :microsecond), 1_000}, {started_at, 10}, {~U[2026-01-10 15:15:00.000000Z], 20}, {ended_at, 30}, {DateTime.add(ended_at, 1, :microsecond), 2_000}] do
+      insert_model_usage!(pool, api_key, assignment, identity, model, timestamp, total_tokens: tokens, input_tokens: tokens, output_tokens: 0, settled_cost_micros: 0, estimated_cost_micros: tokens)
+    end
+
+    %{num_rows: changed} = Repo.query!("UPDATE hourly_model_usage_rollups SET total_tokens = 99999 WHERE pool_id = $1", [Ecto.UUID.dump!(pool.id)])
+    assert changed > 0
+
+    for zone <- ["UTC", "Asia/Kathmandu"] do
+      Repo.query!("SELECT set_config('TimeZone', $1, true)", [zone])
+      result = Reporting.model_usage_buckets_for_pool_ids([pool.id], :one_hour, started_at, ended_at)
+      assert Enum.map(result.rows, &{&1.bucket, &1.total_tokens, &1.estimated_cost_micros, &1.settled_cost_micros}) == [{started_at, 10, 10, 0}, {~U[2026-01-10 15:15:00.000000Z], 20, 20, 0}, {ended_at, 30, 30, 0}]
+      assert result.source == :raw_settlement_buckets
+      assert result.rollup_source == nil
+      assert result.edge_source == nil
+    end
+  end
+
   test "model usage uses one exact raw interval when no complete bucket and mirrors rollup semantics" do
     pool = pool_fixture(%{slug: "reporting-model-same-bucket"})
     %{api_key: api_key} = active_api_key_fixture(pool)
@@ -643,11 +669,20 @@ defmodule CodexPooler.Accounting.ReportingTest do
         ended_at
       )
 
-    assert result.source == :hourly_model_usage_rollups_with_exact_edges
+    assert result.source == :raw_settlement_buckets
+    assert result.rollup_source == nil
+    assert result.edge_source == nil
 
-    assert [row] = result.rows
-    assert row.bucket == ~U[2026-08-14 10:00:00.000000Z]
-    assert row.model_code == "Unknown model"
+    assert [first, last] = result.rows
+    assert first.bucket == started_at
+    assert last.bucket == ended_at
+    assert first.request_count == 1
+    assert last.request_count == 1
+    assert first.total_tokens == 30
+    assert last.total_tokens == 0
+    fields = ~w(request_count success_count failure_count retry_count input_tokens cached_input_tokens output_tokens reasoning_tokens total_tokens estimated_cost_micros settled_cost_micros)a
+    row = Map.new(fields, fn field -> {field, Enum.sum_by(result.rows, &Map.fetch!(&1, field))} end)
+    assert Enum.all?(result.rows, &(&1.model_code == "Unknown model"))
     assert row.request_count == 2
     assert row.success_count == 0
     assert row.failure_count == 2

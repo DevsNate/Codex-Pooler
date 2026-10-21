@@ -31,7 +31,7 @@ defmodule CodexPooler.Accounting.Reporting.StatsUsage do
   """
 
   @columns [:source_count, :request_count, :input_tokens, :cached_input_tokens, :output_tokens, :reasoning_tokens, :total_tokens, :settled_cost_micros]
-  @buckets @source <> "SELECT date_trunc($4::text, occurred_at, 'UTC') AS occurred_at, " <> @sums <> " FROM source GROUP BY 1 ORDER BY 1"
+  @buckets @source <> "SELECT CASE WHEN $4::text = 'five_minutes' THEN date_bin('5 minutes', occurred_at, timestamptz '1970-01-01 00:00:00+00') ELSE date_trunc($4::text, occurred_at, 'UTC') END AS occurred_at, " <> @sums <> " FROM source GROUP BY 1 ORDER BY 1"
   @upstreams @source <> "SELECT upstream_identity_id::text, " <> @sums <> " FROM source GROUP BY upstream_identity_id"
   @keys @source <>
           ", grouped AS (SELECT api_key_id, array_agg(DISTINCT pool_id::text) AS pool_ids, " <>
@@ -52,10 +52,10 @@ defmodule CodexPooler.Accounting.Reporting.StatsUsage do
 
   @type result :: %{buckets: [map()], upstreams: [map()], keys: [map()], source_count: non_neg_integer()}
 
-  @spec query([Ecto.UUID.t()], :hour | :day, DateTime.t(), DateTime.t()) :: result()
+  @spec query([Ecto.UUID.t()], :five_minutes | :hour | :day, DateTime.t(), DateTime.t()) :: result()
   def query([], _granularity, _started_at, _ended_at), do: %{buckets: [], upstreams: [], keys: [], source_count: 0}
 
-  def query(pool_ids, granularity, started_at, ended_at) when granularity in [:hour, :day] do
+  def query(pool_ids, granularity, started_at, ended_at) when granularity in [:five_minutes, :hour, :day] do
     params = [Enum.map(pool_ids, &Ecto.UUID.dump!/1), started_at, ended_at]
     buckets = project(@buckets, params ++ [Atom.to_string(granularity)], [:occurred_at | @columns], :stats_settlement_buckets)
 

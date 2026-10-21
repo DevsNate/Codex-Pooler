@@ -1011,6 +1011,7 @@ defmodule CodexPoolerWeb.Admin.StatsLiveTest do
       refute html =~ "raw prompt #{sensitive_marker}"
     end
 
+    @tag :stats_five_minutes
     test "merges model usage into traffic with independent accessible chart controls", %{
       conn: conn,
       scope: scope
@@ -1050,6 +1051,16 @@ defmodule CodexPoolerWeb.Admin.StatsLiveTest do
         |> element("#stats-traffic-chart-plot")
         |> render()
         |> chart_json_attribute("data-chart-series")
+
+      expected_categories = Enum.map(~w(11:00 11:05 11:10 11:15 11:20 11:25 11:30 11:35 11:40 11:45 11:50 11:55 12:00), &("01-10 " <> &1))
+
+      for selector <- ["#stats-traffic-chart-plot", "#stats-token-cost-chart-plot"] do
+        chart_html = view |> element(selector) |> render()
+        assert chart_json_attribute(chart_html, "data-chart-categories") == expected_categories
+        assert Enum.all?(chart_json_attribute(chart_html, "data-chart-series"), &(length(&1["data"]) == 13))
+      end
+
+      assert Enum.map(traffic_series, & &1["data"]) == [List.duplicate(0, 12) ++ [13], List.duplicate(0, 12) ++ [1]]
 
       assert Enum.map(traffic_series, & &1["name"]) == ["gpt-chart-baseline", "Requests"]
       assert Enum.map(traffic_series, & &1["type"]) == ["column", "line"]
@@ -1195,18 +1206,17 @@ defmodule CodexPoolerWeb.Admin.StatsLiveTest do
             display_name: "Ranked Model Display Name #{sensitive_marker}"
           })
 
-        insert_hourly_model_usage_rollup!(
-          pool,
-          model,
-          as_of |> truncate_to_hour() |> DateTime.add(-1, :hour),
-          %{
-            total_tokens: total_tokens,
-            input_tokens: total_tokens,
-            cached_input_tokens: 0,
-            output_tokens: 0,
-            reasoning_tokens: 0
-          }
-        )
+        stats_model_usage_fixture(pool, model, %{
+          sensitive_marker: sensitive_marker,
+          as_of: as_of,
+          occurred_at: DateTime.add(as_of, -35, :minute),
+          correlation_id: "stats-model-usage-#{model_code}",
+          total_tokens: total_tokens,
+          input_tokens: total_tokens,
+          cached_input_tokens: 0,
+          output_tokens: 0,
+          reasoning_tokens: 0
+        })
       end
 
       {:ok, view, _html} =
@@ -1217,7 +1227,7 @@ defmodule CodexPoolerWeb.Admin.StatsLiveTest do
                "#stats-traffic-chart-plot[data-chart-legend='always'][data-chart-safe-tooltip='true'][data-chart-stacked='true'][data-chart-bar-radius='0']"
              )
 
-      assert has_element?(view, "#stats-traffic-chart", "633 tokens / 2 requests")
+      assert has_element?(view, "#stats-traffic-chart", "633 tokens / 7 requests")
       refute has_element?(view, "[id^='stats-model-usage-chart']")
 
       chart_html = view |> element("#stats-traffic-chart-plot") |> render()
@@ -1244,7 +1254,7 @@ defmodule CodexPoolerWeb.Admin.StatsLiveTest do
       assert units == List.duplicate("tokens", 6) ++ ["requests"]
       assert value_kinds == List.duplicate("tokens", 6) ++ ["integer"]
       assert series |> Enum.at(5) |> Map.fetch!("data") |> Enum.sum() == 130
-      assert series |> List.last() |> Map.fetch!("data") |> Enum.sum() == 2
+      assert series |> List.last() |> Map.fetch!("data") |> Enum.sum() == 7
 
       assert [
                %{
@@ -2415,7 +2425,7 @@ defmodule CodexPoolerWeb.Admin.StatsLiveTest do
 
     %{identity: identity, assignment: assignment} = upstream_assignment_fixture(pool)
 
-    bucket = attrs |> Map.fetch!(:as_of) |> truncate_to_hour()
+    bucket = Map.get_lazy(attrs, :occurred_at, fn -> attrs |> Map.fetch!(:as_of) |> truncate_to_hour() end)
 
     request =
       request_fixture(%{pool: pool, api_key: api_key}, %{

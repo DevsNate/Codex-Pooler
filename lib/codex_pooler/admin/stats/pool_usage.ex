@@ -452,42 +452,16 @@ defmodule CodexPooler.Admin.Stats.PoolUsage do
   defp pool_bucket_granularity(:seven_days), do: :day
   defp pool_bucket_granularity(_window), do: :hour
 
-  defp pool_histogram_labels(started_at, ended_at, :one_hour) do
-    started_bucket = five_minute_bucket(started_at)
-    ended_bucket = five_minute_bucket(ended_at)
-    count = div(DateTime.diff(ended_bucket, started_bucket, :second), 300) + 1
-
-    if DateTime.compare(started_at, ended_at) != :gt and count in 1..13 do
-      Enum.map(0..(count - 1), fn index ->
-        started_bucket |> DateTime.add(index * 300, :second) |> DateTime.to_iso8601()
-      end)
-    else
-      []
-    end
-  end
-
   defp pool_histogram_labels(_started_at, ended_at, :seven_days),
     do: Buckets.labels(%{window: :seven_days, ended_at: ended_at})
 
   defp pool_histogram_labels(started_at, ended_at, window),
     do: Buckets.stats_labels(%{window: window, started_at: started_at, ended_at: ended_at})
 
-  defp pool_bucket_label(datetime, :one_hour),
-    do: datetime |> five_minute_bucket() |> DateTime.to_iso8601()
-
-  defp pool_bucket_label(datetime, window), do: Buckets.label(datetime, window)
-
-  defp five_minute_bucket(datetime) do
-    datetime
-    |> DateTime.to_unix()
-    |> then(&(Integer.floor_div(&1, 300) * 300))
-    |> DateTime.from_unix!()
-  end
-
   defp pool_token_histograms(pool_ids, settlements, labels, window) do
     entries_by_pool_bucket =
       Enum.group_by(settlements, fn settlement ->
-        {settlement.pool_id, pool_bucket_label(settlement.bucket, window)}
+        {settlement.pool_id, Buckets.label(settlement.bucket, window)}
       end)
 
     Map.new(pool_ids, fn pool_id ->
@@ -508,7 +482,7 @@ defmodule CodexPooler.Admin.Stats.PoolUsage do
   defp pool_request_histograms(pool_ids, request_counts, labels, window) do
     requests_by_pool_bucket =
       Map.new(request_counts, fn row ->
-        {{row.pool_id, pool_bucket_label(row.bucket, window)}, row.requests}
+        {{row.pool_id, Buckets.label(row.bucket, window)}, row.requests}
       end)
 
     Map.new(pool_ids, fn pool_id ->

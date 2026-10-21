@@ -9,8 +9,7 @@ defmodule CodexPooler.Admin.GatewayReadModel do
   alias CodexPooler.Gateway.Persistence.SessionReadModel
   alias CodexPooler.Repo
 
-  @type bucket_granularity :: :hour | :day
-  @type pool_bucket_granularity :: :five_minutes | bucket_granularity()
+  @type bucket_granularity :: :five_minutes | :hour | :day
   @failed_request_statuses ~w(failed rejected)
 
   @spec requests_for_pool_ids([Ecto.UUID.t()], DateTime.t(), DateTime.t()) :: [map()]
@@ -75,6 +74,29 @@ defmodule CodexPooler.Admin.GatewayReadModel do
         ) :: [map()]
   def stats_request_status_buckets_for_pool_ids([], _started_at, _ended_at, _granularity),
     do: []
+
+  def stats_request_status_buckets_for_pool_ids(pool_ids, started_at, ended_at, :five_minutes) do
+    if DateTime.compare(started_at, ended_at) == :gt do
+      []
+    else
+      from(request in Request,
+        as: :request,
+        where:
+          request.pool_id in ^pool_ids and request.admitted_at >= ^started_at and
+            request.admitted_at <= ^ended_at,
+        group_by: selected_as(:bucket),
+        order_by: [asc: selected_as(:bucket)],
+        select: %{
+          bucket: selected_as(type(fragment("date_bin(INTERVAL '5 minutes', ? AT TIME ZONE 'UTC', TIMESTAMP '1970-01-01')", request.admitted_at), :utc_datetime_usec), :bucket),
+          requests: count(request.id),
+          succeeded: filter(count(request.id), request.status == "succeeded"),
+          in_progress: filter(count(request.id), request.status == "in_progress")
+        }
+      )
+      |> select_merge(^outcome_counts())
+      |> Repo.all(telemetry_options: [reporting_projection: :stats_request_status_buckets])
+    end
+  end
 
   def stats_request_status_buckets_for_pool_ids(pool_ids, started_at, ended_at, :hour) do
     if DateTime.compare(started_at, ended_at) == :gt do
@@ -188,7 +210,7 @@ defmodule CodexPooler.Admin.GatewayReadModel do
           [Ecto.UUID.t()],
           DateTime.t(),
           DateTime.t(),
-          pool_bucket_granularity()
+          bucket_granularity()
         ) :: [
           %{
             required(:pool_id) => Ecto.UUID.t(),

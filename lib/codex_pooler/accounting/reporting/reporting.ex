@@ -14,7 +14,8 @@ defmodule CodexPooler.Accounting.Reporting do
   @recorded "recorded"
   @usage_known "usage_known"
   @type model_usage_source ::
-          :hourly_model_usage_rollups_with_exact_edges
+          :raw_settlement_buckets
+          | :hourly_model_usage_rollups_with_exact_edges
           | :daily_model_rollups_with_exact_edges
   @type model_usage_bucket :: %{
           required(:bucket) => Date.t() | DateTime.t(),
@@ -34,8 +35,8 @@ defmodule CodexPooler.Accounting.Reporting do
         }
   @type model_usage_bucket_result :: %{
           required(:source) => model_usage_source(),
-          required(:rollup_source) => :hourly_model_usage_rollups | :daily_model_rollups,
-          required(:edge_source) => :raw_settlement_edges,
+          required(:rollup_source) => :hourly_model_usage_rollups | :daily_model_rollups | nil,
+          required(:edge_source) => :raw_settlement_edges | nil,
           required(:confidence) => :temporal_containment_only,
           required(:rows) => [model_usage_bucket()]
         }
@@ -167,7 +168,7 @@ defmodule CodexPooler.Accounting.Reporting do
     )
   end
 
-  @spec stats_usage_for_pool_ids([Ecto.UUID.t()], :hour | :day, DateTime.t(), DateTime.t()) :: StatsUsage.result()
+  @spec stats_usage_for_pool_ids([Ecto.UUID.t()], :five_minutes | :hour | :day, DateTime.t(), DateTime.t()) :: StatsUsage.result()
   defdelegate stats_usage_for_pool_ids(pool_ids, granularity, started_at, ended_at), to: StatsUsage, as: :query
 
   @spec settlement_usage_buckets_for_pool_ids(
@@ -499,7 +500,7 @@ defmodule CodexPooler.Accounting.Reporting do
     %{
       source: source,
       rollup_source: model_usage_rollup_source(granularity),
-      edge_source: :raw_settlement_edges,
+      edge_source: if(granularity == :five_minutes, do: nil, else: :raw_settlement_edges),
       confidence: :temporal_containment_only,
       rows: rows
     }
@@ -755,17 +756,20 @@ defmodule CodexPooler.Accounting.Reporting do
 
   defp valid_pool_ids(_pool_ids), do: []
 
+  defp model_usage_granularity(:one_hour), do: :five_minutes
   defp model_usage_granularity(:seven_days), do: :day
 
   defp model_usage_granularity(window)
-       when window in [:one_hour, :five_hours, :twenty_four_hours],
+       when window in [:five_hours, :twenty_four_hours],
        do: :hour
 
   defp model_usage_granularity(_window), do: nil
 
+  defp model_usage_source(:five_minutes), do: :raw_settlement_buckets
   defp model_usage_source(:day), do: :daily_model_rollups_with_exact_edges
   defp model_usage_source(_granularity), do: :hourly_model_usage_rollups_with_exact_edges
 
+  defp model_usage_rollup_source(:five_minutes), do: nil
   defp model_usage_rollup_source(:day), do: :daily_model_rollups
   defp model_usage_rollup_source(_granularity), do: :hourly_model_usage_rollups
 

@@ -59,6 +59,7 @@ defmodule CodexPooler.Accounting.Reporting.ModelUsage do
   raw_edge_source AS (
     SELECT
       CASE
+        WHEN $6::text = 'five_minutes' THEN date_bin('5 minutes', entry.occurred_at, timestamptz '1970-01-01 00:00:00+00')
         WHEN $6::text = 'day' THEN date_trunc('day', entry.occurred_at, 'UTC')
         ELSE date_trunc('hour', entry.occurred_at, 'UTC')
       END AS bucket,
@@ -160,7 +161,7 @@ defmodule CodexPooler.Accounting.Reporting.ModelUsage do
   ORDER BY series_rank ASC, model_code ASC, bucket ASC
   """
 
-  @type granularity :: :hour | :day
+  @type granularity :: :five_minutes | :hour | :day
 
   @spec query([Ecto.UUID.t()], granularity(), DateTime.t(), DateTime.t()) :: [map()]
   def query(pool_ids, granularity, started_at, ended_at) do
@@ -191,6 +192,8 @@ defmodule CodexPooler.Accounting.Reporting.ModelUsage do
       ]
     }
   end
+
+  defp complete_bounds(:five_minutes, started_at, _ended_at), do: {started_at, started_at}
 
   defp complete_bounds(:hour, started_at, ended_at),
     do: {ceil_hour(started_at), floor_hour(ended_at)}
@@ -264,7 +267,7 @@ defmodule CodexPooler.Accounting.Reporting.ModelUsage do
     }
   end
 
-  defp bucket(%DateTime{} = bucket, :hour), do: bucket
+  defp bucket(%DateTime{} = bucket, granularity) when granularity in [:five_minutes, :hour], do: bucket
   defp bucket(%DateTime{} = bucket, :day), do: DateTime.to_date(bucket)
 
   defp integer(%Decimal{} = value), do: value |> Decimal.round(0) |> Decimal.to_integer()

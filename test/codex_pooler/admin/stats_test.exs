@@ -621,9 +621,79 @@ defmodule CodexPooler.Admin.StatsTest do
            ) == []
   end
 
+  @tag :stats_five_minutes
+  test "one-hour stats aligns requests tokens cost and models on inclusive UTC five-minute slots" do
+    scope = owner_scope()
+    pool = pool_fixture()
+    %{api_key: api_key} = active_api_key_fixture(pool)
+    %{identity: identity, assignment: assignment} = upstream_assignment_fixture(pool)
+    model = model_fixture(pool, %{exposed_model_id: "sample-five-minute-model"})
+    started_at = ~U[2026-01-10 23:12:30.123456Z]
+    as_of = ~U[2026-01-11 00:12:30.123456Z]
+
+    for {timestamp, tokens, usage_status} <- [
+          {DateTime.add(started_at, -1, :microsecond), 1_000, "usage_known"},
+          {started_at, 10, "usage_known"},
+          {~U[2026-01-10 23:14:59.999999Z], 20, "usage_known"},
+          {~U[2026-01-10 23:15:00.000000Z], 30, "usage_known"},
+          {~U[2026-01-10 23:15:00.000001Z], 40, "usage_known"},
+          {~U[2026-01-10 23:25:00.000000Z], 9_000, "usage_unknown"},
+          {as_of, 50, "usage_known"},
+          {DateTime.add(as_of, 1, :microsecond), 2_000, "usage_known"}
+        ] do
+      request = insert_timed_usage!(pool, api_key, assignment, identity, timestamp, tokens, %{usage_status: usage_status})
+
+      outcome =
+        case tokens do
+          10 -> %{status: "succeeded"}
+          20 -> %{status: "failed", last_error_code: "client_disconnected"}
+          30 -> %{status: "failed", last_error_code: "upstream_error"}
+          40 -> %{status: "in_progress"}
+          50 -> %{status: "succeeded"}
+          _other -> %{status: "accepted"}
+        end
+
+      request |> Ecto.Changeset.change(Map.put(outcome, :model_id, model.id)) |> Repo.update!()
+    end
+
+    other_pool = pool_fixture()
+    %{api_key: other_key} = active_api_key_fixture(other_pool)
+    %{identity: other_identity, assignment: other_assignment} = upstream_assignment_fixture(other_pool)
+    other_model = model_fixture(other_pool)
+    insert_model_request_and_settlement!(other_pool, other_key, other_assignment, other_identity, other_model, as_of, total_tokens: 50_000)
+    insert_hourly_model_usage_rollup!(pool, model, ~U[2026-01-10 23:00:00.000000Z], total_tokens: 99_999)
+    labels = Enum.map(~w(23:10 23:15 23:20 23:25 23:30 23:35 23:40 23:45 23:50 23:55), &("2026-01-10T" <> &1 <> ":00Z")) ++ Enum.map(~w(00:00 00:05 00:10), &("2026-01-11T" <> &1 <> ":00Z"))
+    expected_requests = [2, 2, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1]
+    expected_tokens = [30, 70, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 50]
+
+    for zone <- ["UTC", "Asia/Kathmandu"] do
+      Repo.query!("SELECT set_config('TimeZone', $1, true)", [zone])
+      assert Repo.query!("SHOW TimeZone").rows == [[zone]]
+      assert {:ok, dashboard} = Stats.build_dashboard(scope, %{pool_id: pool.id, window: "1h", as_of: as_of})
+      assert Enum.map(dashboard.charts.requests, & &1.bucket) == labels
+      assert Enum.map(dashboard.charts.tokens, & &1.bucket) == labels
+      assert Enum.map(dashboard.charts.settled_cost, & &1.bucket) == labels
+      assert Enum.map(dashboard.charts.model_usage, & &1.bucket) == labels
+      assert Enum.map(dashboard.charts.requests, & &1.requests) == expected_requests
+      assert Enum.map(dashboard.charts.tokens, & &1.total_tokens) == expected_tokens
+      assert Enum.map(dashboard.charts.settled_cost, & &1.settled_cost_micros) == expected_tokens
+      assert Enum.map(dashboard.charts.model_usage, & &1.total_tokens) == expected_tokens
+      assert hd(dashboard.charts.requests).succeeded == 1
+      assert hd(dashboard.charts.requests).client_cancelled == 1
+      assert Enum.at(dashboard.charts.requests, 1).failed == 1
+      assert Enum.at(dashboard.charts.requests, 1).in_progress == 1
+      assert dashboard.kpis.requests.value == 6
+      assert dashboard.kpis.tokens.total_tokens == 150
+      assert dashboard.kpis.settled_cost.micros == 150
+      assert dashboard.sources.model_usage_source == :raw_settlement_buckets
+      assert dashboard.sources.model_usage_rollup_source == nil
+      assert dashboard.sources.model_usage_edge_source == nil
+    end
+  end
+
   test "stats labels cover both exact inclusive bounds while fixed labels retain their counts" do
     for {window, seconds, stats_count, pool_usage_count} <- [
-          {:one_hour, 60 * 60, 2, 1},
+          {:one_hour, 60 * 60, 13, 1},
           {:five_hours, 5 * 60 * 60, 6, 5},
           {:twenty_four_hours, 24 * 60 * 60, 25, 24},
           {:seven_days, 7 * 24 * 60 * 60, 8, 7}
@@ -644,7 +714,7 @@ defmodule CodexPooler.Admin.StatsTest do
       ended_at: ~U[2026-08-14 08:00:00.000000Z]
     }
 
-    assert length(Buckets.stats_labels(aligned)) == 2
+    assert length(Buckets.stats_labels(aligned)) == 13
   end
 
   test "dashboard consumes bounded request buckets and database-limited recent failures" do
@@ -1406,12 +1476,11 @@ defmodule CodexPooler.Admin.StatsTest do
     assert dashboard.quota.summary.state == :unknown
     assert Enum.map(dashboard.empty_states, & &1.code) == [:no_requests, :no_usage]
 
-    assert [
-             %{requests: 0, succeeded: 0, failed: 0, in_progress: 0},
-             %{requests: 0, succeeded: 0, failed: 0, in_progress: 0}
-           ] = dashboard.charts.requests
-
-    assert [%{total_tokens: 0}, %{total_tokens: 0}] = dashboard.charts.tokens
+    labels = Enum.map(~w(11:00 11:05 11:10 11:15 11:20 11:25 11:30 11:35 11:40 11:45 11:50 11:55 12:00), &("2026-01-10T" <> &1 <> ":00Z"))
+    assert Enum.map(dashboard.charts.requests, & &1.bucket) == labels
+    assert Enum.all?(dashboard.charts.requests, &(&1.requests == 0 and &1.succeeded == 0 and &1.failed == 0 and &1.client_cancelled == 0 and &1.in_progress == 0))
+    assert Enum.map(dashboard.charts.tokens, & &1.bucket) == labels
+    assert Enum.all?(dashboard.charts.tokens, &(&1.total_tokens == 0))
     assert Map.fetch!(dashboard.charts, :model_usage) == []
   end
 

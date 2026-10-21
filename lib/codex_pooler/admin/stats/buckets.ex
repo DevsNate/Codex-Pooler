@@ -26,6 +26,20 @@ defmodule CodexPooler.Admin.Stats.Buckets do
           required(:started_at) => DateTime.t(),
           required(:ended_at) => DateTime.t()
         }) :: [String.t()]
+  def stats_labels(%{window: :one_hour, started_at: started_at, ended_at: ended_at}) do
+    started_bucket = five_minute_bucket(started_at)
+    ended_bucket = five_minute_bucket(ended_at)
+    count = div(DateTime.diff(ended_bucket, started_bucket, :second), 300) + 1
+
+    if DateTime.compare(started_at, ended_at) != :gt and count in 1..13 do
+      Enum.map(0..(count - 1), fn index ->
+        started_bucket |> DateTime.add(index * 300, :second) |> DateTime.to_iso8601()
+      end)
+    else
+      []
+    end
+  end
+
   def stats_labels(%{window: :seven_days, started_at: started_at, ended_at: ended_at}) do
     started_on = DateTime.to_date(started_at)
     ended_on = DateTime.to_date(ended_at)
@@ -41,7 +55,7 @@ defmodule CodexPooler.Admin.Stats.Buckets do
   end
 
   def stats_labels(%{window: window, started_at: started_at, ended_at: ended_at})
-      when window in [:one_hour, :five_hours, :twenty_four_hours] do
+      when window in [:five_hours, :twenty_four_hours] do
     started_hour = truncate_to_hour(started_at)
     ended_hour = truncate_to_hour(ended_at)
     count = div(DateTime.diff(ended_hour, started_hour, :second), 60 * 60) + 1
@@ -59,6 +73,8 @@ defmodule CodexPooler.Admin.Stats.Buckets do
 
   @spec label(DateTime.t() | nil, atom()) :: String.t() | nil
   def label(nil, _window), do: nil
+
+  def label(datetime, :one_hour), do: datetime |> five_minute_bucket() |> DateTime.to_iso8601()
 
   def label(datetime, :seven_days),
     do: datetime |> DateTime.to_date() |> Date.to_iso8601()
@@ -85,7 +101,13 @@ defmodule CodexPooler.Admin.Stats.Buckets do
     %{datetime | minute: 0, second: 0, microsecond: {0, 0}}
   end
 
-  defp max_stats_label_count(:one_hour), do: 2
+  defp five_minute_bucket(datetime) do
+    datetime
+    |> DateTime.to_unix()
+    |> then(&(Integer.floor_div(&1, 300) * 300))
+    |> DateTime.from_unix!()
+  end
+
   defp max_stats_label_count(:five_hours), do: 6
   defp max_stats_label_count(:twenty_four_hours), do: 25
 end
