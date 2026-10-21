@@ -153,40 +153,19 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.StalledReaderReceiptTest 
       assert FakeUpstream.count(upstream) == 1
     end
 
-    # The production shape of the same stall: the client stops reading, the
-    # listener's write blocks on the full connection (the default 30 s send
-    # timeout is kept), and the connection is then reset (the client, or a
-    # proxy in front of the Pooler, drops it). The blocked write fails at once,
-    # so the released client's reconnect resend arrives well inside the 30 s
-    # client-retry window, which a resend after a 30 s send timeout never does.
-    @tag forwarding: forwarding
-    test "owner forwarding #{forwarding}: a client dropped while the listener's write is blocked gets an aborted receipt and its identical resend is served", %{forwarding: forwarding} do
-      %{setup: setup, upstream: upstream, port: port, turn_state: turn_state, raw_payload: raw_payload} = scenario!(forwarding, send_timeout: :default)
-      {conn, websocket, ref} = public_websocket_connect!(port, setup, turn_state)
-      :ok = :inet.setopts(Mint.HTTP.get_socket(conn), recbuf: @buffer_bytes)
-      {:ok, conn} = Mint.HTTP.set_mode(conn, :passive)
-      {conn, _websocket} = public_websocket_send_text!(conn, websocket, ref, raw_payload)
-
-      %Request{id: request_id} = await_request!(setup.pool.id, System.monotonic_time(:millisecond) + @timeout_ms)
-      :ok = await_blocked_listener_write!(conn, System.monotonic_time(:millisecond) + @timeout_ms)
-      # A reset, not a close handshake.
-      :ok = :inet.setopts(Mint.HTTP.get_socket(conn), linger: {true, 0})
-      _closed = Mint.HTTP.close(conn)
-
-      receipt = await_receipt!(request_id, System.monotonic_time(:millisecond) + @timeout_ms)
-      _settled = await_settled!(request_id, System.monotonic_time(:millisecond) + @timeout_ms)
-
-      assert %{"outcome" => "aborted", "terminal_class" => "none", "highest_frame_class" => "delta", "pushed_at" => nil} = receipt
-      assert receipt["write_failure"] in ["closed", "other"]
-      assert receipt["frames_after_visible"] < @total_frames
-
-      resend = send_and_receive_terminal!(port, setup, turn_state, raw_payload)
-      await_all_settled!(setup.pool.id, System.monotonic_time(:millisecond) + @timeout_ms)
-
-      assert resend["type"] == "response.completed"
-      assert [%Request{id: ^request_id, status: "succeeded"}, %Request{id: successor_id, status: "succeeded"}] = pool_requests(setup.pool.id)
-      assert [%RequestClientRetryLink{predecessor_request_id: ^request_id, successor_request_id: ^successor_id}] = Repo.all(RequestClientRetryLink)
-      assert FakeUpstream.count(upstream) == 2
+    # The client stops reading, leaving bytes in the listener's driver queue,
+    # then resets the connection. The receipt names only the confirmed prefix:
+    # with a large first delta, that prefix ends at content_part.added. Keep
+    # the default 30 s send timeout, so the reset causes the actual failure and
+    # the identical resend arrives inside its 30 s client-retry window.
+    for {first_delta_bytes, queued_output, boundary} <- [
+          {@delta_bytes, "queued output", :incomplete_prefix},
+          {1_048_576, "the first delta queued", :before_first_delta}
+        ] do
+      @tag forwarding: forwarding
+      test "owner forwarding #{forwarding}: a client dropped with #{queued_output} gets an aborted receipt and its identical resend is served", %{forwarding: forwarding} do
+        assert_resend_after_queued_write_drop!(forwarding, unquote(first_delta_bytes), unquote(boundary))
+      end
     end
 
     # The other direction: the client read the whole turn, terminal included,
@@ -289,6 +268,42 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.StalledReaderReceiptTest 
     assert FakeUpstream.count(upstream) == 2
   end
 
+  defp assert_resend_after_queued_write_drop!(forwarding, first_delta_bytes, boundary) do
+    %{setup: setup, upstream: upstream, port: port, turn_state: turn_state, raw_payload: raw_payload} = scenario!(forwarding, send_timeout: :default, first_delta_bytes: first_delta_bytes)
+    {conn, websocket, ref} = public_websocket_connect!(port, setup, turn_state)
+    :ok = :inet.setopts(Mint.HTTP.get_socket(conn), recbuf: @buffer_bytes)
+    {:ok, conn} = Mint.HTTP.set_mode(conn, :passive)
+    {conn, _websocket} = public_websocket_send_text!(conn, websocket, ref, raw_payload)
+
+    %Request{id: request_id} = await_request!(setup.pool.id, System.monotonic_time(:millisecond) + @timeout_ms)
+    :ok = await_queued_listener_bytes!(conn, System.monotonic_time(:millisecond) + @timeout_ms)
+    # A reset, not a close handshake.
+    :ok = :inet.setopts(Mint.HTTP.get_socket(conn), linger: {true, 0})
+    _closed = Mint.HTTP.close(conn)
+
+    receipt = await_receipt!(request_id, System.monotonic_time(:millisecond) + @timeout_ms)
+    _settled = await_settled!(request_id, System.monotonic_time(:millisecond) + @timeout_ms)
+
+    assert %{"outcome" => "aborted", "terminal_class" => "none", "pushed_at" => nil, "frames_after_visible" => frame_count} = receipt
+    assert receipt["write_failure"] in ["closed", "other"]
+    assert frame_count in 4..(@deltas + 4)
+    assert receipt["highest_frame_class"] == if(frame_count == 4, do: "part_added", else: "delta")
+    refute Map.has_key?(receipt, "completed_items")
+
+    if boundary == :before_first_delta do
+      assert %{"frames_after_visible" => 4, "highest_frame_class" => "part_added"} = receipt
+    end
+
+    resend = send_and_receive_terminal!(port, setup, turn_state, raw_payload)
+    await_all_settled!(setup.pool.id, System.monotonic_time(:millisecond) + @timeout_ms)
+
+    assert resend["type"] == "response.completed"
+    assert [%Request{id: ^request_id, status: "succeeded"}, %Request{id: successor_id, status: "succeeded"}] = pool_requests(setup.pool.id)
+    assert [%RequestClientRetryLink{predecessor_request_id: ^request_id, successor_request_id: ^successor_id}] = Repo.all(RequestClientRetryLink)
+    assert_one_settlement_each!([request_id, successor_id])
+    assert FakeUpstream.count(upstream) == 2
+  end
+
   defp scenario!(forwarding, opts \\ []) do
     CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled, false)
     Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, forwarding)
@@ -296,7 +311,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.StalledReaderReceiptTest 
     upstream =
       start_upstream(
         FakeUpstream.strict_sequence([
-          native_request(FakeUpstream.websocket_text_frames(maybe_content_filter(stream_frames("resp_stalled_original"), opts))),
+          native_request(FakeUpstream.websocket_text_frames(maybe_content_filter(stream_frames("resp_stalled_original", opts), opts))),
           native_request(FakeUpstream.websocket_text_frames(stream_frames("resp_stalled_successor")))
         ])
       )
@@ -383,24 +398,24 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.StalledReaderReceiptTest 
     :ok
   end
 
-  # The listener's side of this connection has data queued in its port that
-  # the full connection does not take: its writer is blocked.
-  defp await_blocked_listener_write!(conn, deadline_ms) do
+  # The unread connection has unsent bytes in its listener-side driver queue.
+  # The inet backend can return from send while those bytes remain queued.
+  defp await_queued_listener_bytes!(conn, deadline_ms) do
     {:ok, client_address} = :inet.sockname(Mint.HTTP.get_socket(conn))
-    await_blocked_port!(client_address, deadline_ms)
+    await_queued_port_bytes!(client_address, deadline_ms)
   end
 
-  defp await_blocked_port!(client_address, deadline_ms) do
-    blocked? =
+  defp await_queued_port_bytes!(client_address, deadline_ms) do
+    queued? =
       Enum.any?(Port.list(), fn port ->
         Port.info(port, :name) == {:name, ~c"tcp_inet"} and :inet.peername(port) == {:ok, client_address} and
           match?({:queue_size, size} when size > 0, :erlang.port_info(port, :queue_size))
       end)
 
     cond do
-      blocked? -> :ok
-      System.monotonic_time(:millisecond) >= deadline_ms -> flunk("the listener's write never blocked")
-      true -> Process.sleep(10) && await_blocked_port!(client_address, deadline_ms)
+      queued? -> :ok
+      System.monotonic_time(:millisecond) >= deadline_ms -> flunk("the listener never queued unsent bytes")
+      true -> Process.sleep(10) && await_queued_port_bytes!(client_address, deadline_ms)
     end
   end
 
@@ -483,9 +498,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.StalledReaderReceiptTest 
     FakeUpstream.expect_request(method: "WEBSOCKET", path: "/backend-api/codex/responses", json: [valid: true, equals: %{"type" => "response.create"}], respond: respond)
   end
 
-  defp stream_frames(response_id) do
+  defp stream_frames(response_id, opts \\ []) do
     item_id = "msg_" <> response_id
     chunk = String.duplicate("a", @delta_bytes)
+    first_chunk = String.duplicate("a", Keyword.get(opts, :first_delta_bytes, @delta_bytes))
     text = String.duplicate(chunk, 2)
     item = %{"id" => item_id, "type" => "message", "role" => "assistant", "status" => "completed", "content" => [%{"type" => "output_text", "text" => text, "annotations" => []}]}
 
@@ -496,7 +512,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.StalledReaderReceiptTest 
         %{"type" => "response.output_item.added", "output_index" => 0, "item" => %{"id" => item_id, "type" => "message", "role" => "assistant", "status" => "in_progress", "content" => []}},
         %{"type" => "response.content_part.added", "item_id" => item_id, "output_index" => 0, "content_index" => 0, "part" => %{"type" => "output_text", "text" => "", "annotations" => []}}
       ] ++
-        for(_delta <- 1..@deltas, do: %{"type" => "response.output_text.delta", "item_id" => item_id, "output_index" => 0, "content_index" => 0, "delta" => chunk}) ++
+        for(delta <- 1..@deltas, do: %{"type" => "response.output_text.delta", "item_id" => item_id, "output_index" => 0, "content_index" => 0, "delta" => if(delta == 1, do: first_chunk, else: chunk)}) ++
         [
           %{"type" => "response.output_text.done", "item_id" => item_id, "output_index" => 0, "content_index" => 0, "text" => text},
           %{"type" => "response.content_part.done", "item_id" => item_id, "output_index" => 0, "content_index" => 0, "part" => %{"type" => "output_text", "text" => text, "annotations" => []}},
