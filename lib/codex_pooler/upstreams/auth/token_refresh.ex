@@ -618,6 +618,7 @@ defmodule CodexPooler.Upstreams.Auth.TokenRefresh do
               "reason" => %{"code" => code, "message" => token_refresh_message(code)}
             })
           )
+          |> CredentialFencing.invalidate_provider_auth_recovery()
       })
       |> Repo.update!()
 

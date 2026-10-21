@@ -7,6 +7,7 @@ defmodule CodexPooler.Upstreams.Auth.TokenRefreshTest do
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Jobs
   alias CodexPooler.Jobs.TokenRefreshWorker
+  alias CodexPooler.Pools.Pool
   alias CodexPooler.Repo
   alias CodexPooler.Upstreams
   alias CodexPooler.Upstreams.Assignments.PoolAssignments
@@ -713,6 +714,160 @@ defmodule CodexPooler.Upstreams.Auth.TokenRefreshTest do
       assert Repo.reload!(identity).status == "active"
       assert {:ok, %{status: :active}} = TokenRefresh.refresh_access_token(identity)
       assert Enum.count(FakeUpstream.requests(upstream), &(&1.path == "/oauth/token")) == 2
+    end
+
+    @tag :refresh_usage_overlap
+    test "usage success cannot resurrect an identity after terminal refresh rejection" do
+      usage_ref = make_ref()
+
+      usage_payload = %{
+        "plan_type" => "pro",
+        "rate_limit" => %{
+          "primary_window" => %{"used_percent" => 10, "limit_window_seconds" => 18_000, "reset_after_seconds" => 3600}
+        }
+      }
+
+      upstream =
+        start_path_upstream(%{
+          "/backend-api/wham/usage" =>
+            FakeUpstream.barrier_json_response(usage_payload,
+              notify: self(),
+              release_ref: usage_ref
+            ),
+          "/oauth/token" => {400, %{"error" => "invalid_grant"}}
+        })
+
+      identity = refreshable_identity_fixture("active", %{"base_url" => FakeUpstream.url(upstream)})
+      store_secret!(identity, "access_token", secret("access", "reauth-overlap"))
+      store_secret!(identity, "refresh_token", secret("refresh", "reauth-overlap"))
+      assignment = active_assignment_for_identity!(identity)
+      parent = self()
+      supervisor = start_supervised!(Task.Supervisor)
+
+      usage =
+        Task.Supervisor.async_nolink(supervisor, fn ->
+          Sandbox.allow(Repo, parent, self())
+          PoolReconciliation.refresh_quota_from_usage(identity, assignment)
+        end)
+
+      usage_monitor = Process.monitor(usage.pid)
+      assert_receive {:fake_upstream_timeout_barrier, :before_headers, usage_handler, ^usage_ref}, @detection_timeout_ms
+
+      assert {:ok, %{status: :reauth_required}} =
+               TokenRefresh.refresh_access_token(identity, trigger_kind: "unit_test")
+
+      rejected_identity = Repo.reload!(identity)
+      rejected_assignment = Repo.reload!(assignment)
+      assert rejected_identity.status == "reauth_required"
+      assert %DateTime{} = rejected_identity.disabled_at
+      assert rejected_assignment.health_status == "disabled"
+      assert rejected_assignment.eligibility_status == "ineligible"
+
+      send(usage_handler, {:fake_upstream_release_timeout, usage_ref})
+      assert {:error, :quota_refresh_superseded} = Task.await(usage, @detection_timeout_ms)
+      assert_receive {:DOWN, ^usage_monitor, :process, _, :normal}, @detection_timeout_ms
+
+      persisted_identity = Repo.reload!(identity)
+      persisted_assignment = Repo.reload!(assignment)
+      assert persisted_identity.status == "reauth_required"
+      assert %DateTime{} = persisted_identity.disabled_at
+      assert persisted_assignment.health_status == "disabled"
+      assert persisted_assignment.eligibility_status == "ineligible"
+    end
+
+    @tag :refresh_usage_overlap
+    test "terminal refresh rejection invalidates recovered usage recovery and newly allocated probes" do
+      usage_ref = make_ref()
+      usage_payload = %{"plan_type" => "pro", "rate_limit" => %{"primary_window" => %{"used_percent" => 10, "limit_window_seconds" => 18_000, "reset_after_seconds" => 3600}}}
+
+      upstream =
+        start_path_upstream(%{
+          "/backend-api/wham/usage" => FakeUpstream.barrier_json_response(usage_payload, notify: self(), release_ref: usage_ref),
+          "/oauth/token" => {400, %{"error" => "invalid_grant"}}
+        })
+
+      identity = refreshable_identity_fixture("active", %{"base_url" => FakeUpstream.url(upstream)})
+      store_secret!(identity, "access_token", secret("access", "recovered-overlap"))
+      store_secret!(identity, "refresh_token", secret("refresh", "recovered-overlap"))
+      assignment = active_assignment_for_identity!(identity)
+      recovery_timestamp = DateTime.utc_now()
+
+      recovery_metadata =
+        identity.metadata
+        |> Map.put("provider_auth_recovery", %{
+          "status" => "awaiting_fresh_quota",
+          "updated_at" => DateTime.to_iso8601(recovery_timestamp)
+        })
+
+      recovering_identity =
+        identity
+        |> UpstreamIdentity.changeset(%{
+          status: "reauth_required",
+          disabled_at: recovery_timestamp,
+          metadata: recovery_metadata
+        })
+        |> Repo.update!()
+
+      assert {:ok, _recovered, recovery_fence} = CredentialFencing.allocate_usage_probe(recovering_identity)
+
+      assert {:ok, :applied, recovered_identity, :recovered} =
+               CredentialFencing.apply_usage_success(
+                 recovering_identity,
+                 recovery_fence,
+                 fn _locked_identity -> {:ok, :recovered} end
+               )
+
+      assert recovered_identity.status == "active"
+      assert recovered_identity.metadata["provider_auth_recovery"]["status"] == "recovered"
+
+      parent = self()
+      supervisor = start_supervised!(Task.Supervisor)
+
+      usage =
+        Task.Supervisor.async_nolink(supervisor, fn ->
+          Sandbox.allow(Repo, parent, self())
+          PoolReconciliation.refresh_quota_from_usage(recovered_identity, assignment)
+        end)
+
+      usage_monitor = Process.monitor(usage.pid)
+      assert_receive {:fake_upstream_timeout_barrier, :before_headers, usage_handler, ^usage_ref}, @detection_timeout_ms
+      assert {:ok, %{status: :reauth_required}} = TokenRefresh.refresh_access_token(recovered_identity, trigger_kind: "unit_test")
+
+      terminal = Repo.reload!(recovered_identity)
+      assert terminal.status == "reauth_required"
+      assert is_nil(terminal.metadata["provider_auth_recovery"])
+
+      assert {:ok, _current, fresh_fence} = CredentialFencing.allocate_usage_probe(terminal)
+
+      assert {:ok, :superseded, _still_terminal, nil} =
+               CredentialFencing.apply_usage_success(terminal, fresh_fence, fn _locked -> flunk("terminal probe applied") end)
+
+      send(usage_handler, {:fake_upstream_release_timeout, usage_ref})
+      assert {:error, :quota_refresh_superseded} = Task.await(usage, @detection_timeout_ms)
+      assert_receive {:DOWN, ^usage_monitor, :process, _, :normal}, @detection_timeout_ms
+
+      pool = Repo.get!(Pool, assignment.pool_id)
+      assert {:ok, job} = Jobs.enqueue_account_reconciliation(pool, assignment)
+      assert %{success: 1, discard: 0} = Oban.drain_queue(queue: :jobs)
+      assert Repo.get!(Oban.Job, job.id).state == "completed"
+    end
+
+    test "usage success preserves paused monitoring state and disabled timestamp" do
+      identity = refreshable_identity_fixture("paused")
+      disabled_at = DateTime.utc_now()
+
+      paused_identity =
+        identity
+        |> UpstreamIdentity.changeset(%{disabled_at: disabled_at})
+        |> Repo.update!()
+
+      assert {:ok, _allocated, fence} = CredentialFencing.allocate_usage_probe(paused_identity)
+
+      assert {:ok, :applied, updated, :persisted} =
+               CredentialFencing.apply_usage_success(paused_identity, fence, fn _locked -> {:ok, :persisted} end)
+
+      assert updated.status == "paused"
+      assert updated.disabled_at == disabled_at
     end
 
     @tag :refresh_usage_overlap

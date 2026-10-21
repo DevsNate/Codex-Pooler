@@ -29,6 +29,8 @@ defmodule CodexPooler.Upstreams.Lifecycle.CredentialFencing do
   @refreshing IdentityStatus.refreshing_status()
   @refresh_failed IdentityStatus.refresh_failed_status()
   @reauth_required IdentityStatus.reauth_required_status()
+  @deleted IdentityStatus.deleted_status()
+  @paused IdentityStatus.paused_status()
 
   @type fence :: %{
           required(:credential_epoch) => pos_integer(),
@@ -80,6 +82,13 @@ defmodule CodexPooler.Upstreams.Lifecycle.CredentialFencing do
     |> Map.put(@credential_epoch_key, epoch)
     |> put_credential_lineage(epoch, epoch)
     |> preserve_terminal_provider_auth_rejection()
+  end
+
+  @spec invalidate_provider_auth_recovery(map() | nil) :: map()
+  def invalidate_provider_auth_recovery(metadata) do
+    metadata
+    |> normalize_metadata()
+    |> Map.delete(@provider_auth_recovery_key)
   end
 
   @doc """
@@ -369,7 +378,7 @@ defmodule CodexPooler.Upstreams.Lifecycle.CredentialFencing do
         is_nil(identity) ->
           Repo.rollback(:upstream_identity_not_found)
 
-        Map.has_key?(identity.metadata || %{}, "permanent_deletion_requested_at") or not current_fence?(identity, fence) ->
+        not usage_success_applicable?(identity, fence) ->
           {:superseded, identity, nil}
 
         true ->
@@ -635,8 +644,8 @@ defmodule CodexPooler.Upstreams.Lifecycle.CredentialFencing do
 
     identity
     |> UpstreamIdentity.changeset(%{
-      status: if(active_token_refresh?(identity, timestamp), do: @refreshing, else: @active),
-      disabled_at: nil,
+      status: usage_success_status(identity, timestamp),
+      disabled_at: usage_success_disabled_at(identity),
       metadata:
         identity.metadata
         |> applied_metadata(fence)
@@ -645,6 +654,35 @@ defmodule CodexPooler.Upstreams.Lifecycle.CredentialFencing do
     })
     |> Repo.update!()
   end
+
+  defp usage_success_status_allowed?(%UpstreamIdentity{status: @deleted}, _fence), do: false
+
+  defp usage_success_status_allowed?(%UpstreamIdentity{status: @reauth_required} = identity, fence) do
+    metadata = initialize_metadata(identity.metadata)
+
+    metadata[@credential_epoch_key] == fence.credential_epoch and
+      provider_auth_recovery_status(metadata) in ["awaiting_fresh_quota", "recovered"]
+  end
+
+  defp usage_success_status_allowed?(_identity, _fence), do: true
+
+  defp usage_success_applicable?(identity, fence) do
+    not Map.has_key?(identity.metadata || %{}, "permanent_deletion_requested_at") and
+      current_fence?(identity, fence) and usage_success_status_allowed?(identity, fence)
+  end
+
+  defp usage_success_status(%UpstreamIdentity{status: @paused}, _timestamp), do: @paused
+  defp usage_success_status(%UpstreamIdentity{status: @refresh_failed}, _timestamp), do: @refresh_failed
+
+  defp usage_success_status(identity, timestamp) do
+    if active_token_refresh?(identity, timestamp), do: @refreshing, else: @active
+  end
+
+  defp usage_success_disabled_at(%UpstreamIdentity{status: status, disabled_at: disabled_at})
+       when status in [@paused, @refresh_failed],
+       do: disabled_at
+
+  defp usage_success_disabled_at(_identity), do: nil
 
   defp provider_auth_rejection_assignments(identity_id) do
     Repo.all(
