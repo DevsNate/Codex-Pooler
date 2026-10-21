@@ -7,6 +7,8 @@ sidebar:
 
 Codex Pooler serves Prometheus metrics at `GET /metrics` on the application listener. Configure access first, then verify your collector can scrape every application replica you want to observe.
 
+Successful scrapes return `text/plain; version=0.0.4`, including requests with `Accept: text/plain` or `Accept: text/plain;version=0.0.4`. Authentication failures return the JSON error described below regardless of the requested format.
+
 ## Protect the metrics endpoint
 
 Manage the metrics bearer token in **System** at `/admin/system`. It is separate from Pool API keys and operator MCP tokens.

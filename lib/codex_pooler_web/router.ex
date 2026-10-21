@@ -93,11 +93,14 @@ defmodule CodexPoolerWeb.Router do
   end
 
   scope "/", CodexPoolerWeb do
+    get "/metrics", Operations.MetricsController, :show
+  end
+
+  scope "/", CodexPoolerWeb do
     pipe_through :api
 
     get "/healthz", Operations.HealthController, :health
     get "/readyz", Operations.HealthController, :readiness
-    get "/metrics", Operations.MetricsController, :show
     get "/api/codex/usage", Runtime.CodexUsageController, :show
 
     get "/wham/usage", Runtime.CodexUsageController, :show
