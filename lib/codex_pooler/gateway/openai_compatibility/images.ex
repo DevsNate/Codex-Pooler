@@ -12,6 +12,7 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Images do
   @qualities ~w(auto low medium high)
   @backgrounds ~w(auto transparent opaque)
   @input_fidelities ~w(low high)
+  @edit_upload_limit 50 * 1024 * 1024
 
   @spec validate_generation(term()) :: {:ok, map()} | {:error, Error.reason()}
   def validate_generation(payload) do
@@ -140,8 +141,7 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Images do
   defp prepare_edit(payload) do
     with {:ok, payload} <- normalize_image_payload(payload),
          :ok <- require_prompt(payload),
-         {:ok, images} <- image_parts(payload),
-         {:ok, mask} <- optional_image_part(payload, "mask"),
+         {:ok, images, mask} <- image_parts(payload),
          {:ok, response_payload} <- response_payload(payload) do
       response_payload = put_edit_images(response_payload, payload["prompt"], images, mask)
 
@@ -275,51 +275,77 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Images do
     if images == [] do
       {:error, Error.invalid_request("image is required", "image")}
     else
-      collect_image_parts(images)
+      uploads = Enum.map(images, &{"image", &1})
+      uploads = if is_nil(payload["mask"]), do: uploads, else: uploads ++ [{"mask", payload["mask"]}]
+
+      with {:ok, metadata} <- image_upload_metadata(uploads) do
+        collect_image_parts(metadata)
+      end
     end
   end
 
-  defp collect_image_parts(images) do
-    images
-    |> Enum.reduce_while({:ok, []}, fn image, {:ok, acc} ->
-      case input_image_part(image, "image") do
-        {:ok, part} -> {:cont, {:ok, [part | acc]}}
-        {:error, reason} -> {:halt, {:error, reason}}
+  defp image_upload_metadata(uploads) do
+    # A later image or mask must not trigger rejection after earlier files were encoded.
+    uploads
+    |> Enum.reduce_while({:ok, [], 0}, fn {param, upload}, {:ok, acc, total} ->
+      case Validation.upload_metadata(upload) do
+        {:ok, %{"bytes" => bytes} = metadata} when total + bytes <= @edit_upload_limit ->
+          {:cont, {:ok, [{param, metadata} | acc], total + bytes}}
+
+        {:ok, _metadata} ->
+          {:halt, {:error, image_upload_too_large()}}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
       end
     end)
     |> case do
-      {:ok, parts} -> {:ok, Enum.reverse(parts)}
+      {:ok, metadata, _total} -> {:ok, Enum.reverse(metadata)}
       {:error, reason} -> {:error, reason}
     end
   end
 
-  defp optional_image_part(payload, key) do
-    case Map.get(payload, key) do
-      nil -> {:ok, nil}
-      value -> input_image_part(value, key)
+  defp collect_image_parts(metadata) do
+    metadata
+    |> Enum.reduce_while({:ok, [], nil, @edit_upload_limit}, fn {param, upload}, {:ok, images, mask, remaining} ->
+      case input_image_part(upload, param, remaining) do
+        {:ok, part, bytes} when param == "mask" -> {:cont, {:ok, images, part, remaining - bytes}}
+        {:ok, part, bytes} -> {:cont, {:ok, [part | images], mask, remaining - bytes}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, images, mask, _remaining} -> {:ok, Enum.reverse(images), mask}
+      {:error, reason} -> {:error, reason}
     end
   end
 
-  defp input_image_part(value, param) do
-    with {:ok, metadata} <- Validation.upload_metadata(value),
-         {:ok, bytes} <- read_upload_bytes(metadata, param) do
+  defp input_image_part(metadata, param, remaining) do
+    with {:ok, bytes} <- read_upload_bytes(metadata, param, remaining) do
       {:ok,
        %{
          "type" => "input_image",
          "image_url" => "data:#{metadata["content_type"]};base64,#{Base.encode64(bytes)}"
-       }}
+       }, byte_size(bytes)}
     end
   end
 
-  defp read_upload_bytes(%{"path" => path}, param) when is_binary(path) do
-    case File.read(path) do
-      {:ok, bytes} -> {:ok, bytes}
-      {:error, _reason} -> {:error, Error.invalid_request("image upload is not readable", param)}
+  defp read_upload_bytes(%{"path" => path}, param, remaining) when is_binary(path) do
+    # Stat is a preflight, not a read bound: count actual bytes if a file grows afterward.
+    case File.open(path, [:read, :binary], &IO.binread(&1, remaining + 1)) do
+      {:ok, bytes} when is_binary(bytes) and byte_size(bytes) <= remaining -> {:ok, bytes}
+      {:ok, bytes} when is_binary(bytes) -> {:error, image_upload_too_large()}
+      {:ok, :eof} -> {:ok, ""}
+      _error -> {:error, Error.invalid_request("image upload is not readable", param)}
     end
   end
 
-  defp read_upload_bytes(_metadata, param),
+  defp read_upload_bytes(_metadata, param, _remaining),
     do: {:error, Error.invalid_request("image upload is not readable", param)}
+
+  defp image_upload_too_large do
+    Error.reason(413, "request_too_large", "image and mask uploads must total at most 50 MiB", "image")
+  end
 
   defp response_payload(payload) do
     tool = %{

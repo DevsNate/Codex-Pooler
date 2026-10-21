@@ -3,6 +3,186 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.ImagesProtocolTest do
   alias CodexPooler.Gateway.OpenAICompatibility.{Images, Responses}
 
   @image_25_models ~w(gpt-image-2.5-flare gpt-image-2.5-sunburst gpt-image-2.5-flare-2026-09-08 gpt-image-2.5-sunburst-2026-09-08)
+  @edit_upload_limit 50 * 1024 * 1024
+  # Detection only: N=4 scheduling can delay trace delivery or writer teardown;
+  # successful cases finish on messages without spending this budget.
+  @fixture_detection_timeout_ms 15_000
+
+  test "edit upload limit rejects oversized images, arrays and masks before reading any file" do
+    oversized = sized_upload(@edit_upload_limit + 1)
+    half = sized_upload(div(@edit_upload_limit, 2))
+    over_half = sized_upload(div(@edit_upload_limit, 2) + 1)
+
+    for inputs <- [
+          %{"image" => oversized},
+          %{"image[]" => [half, over_half]},
+          %{"image" => half, "mask" => over_half}
+        ] do
+      {result, read_calls} = image_file_reads(fn -> Images.coerce_edit(Map.merge(payload(), inputs)) end)
+      assert edit_result_status(result) == {413, "request_too_large"}
+      assert read_calls == 0
+    end
+  end
+
+  @tag slow: "encodes real uploads at the 50 MiB aggregate boundary"
+  test "edit upload limit accepts exactly 50 MiB for native, array and masked translations" do
+    complete = sized_upload(@edit_upload_limit)
+    half = sized_upload(div(@edit_upload_limit, 2))
+
+    for {model, inputs} <- [
+          {"gpt-image-2", %{"image" => complete}},
+          {"gpt-image-2", %{"image[]" => [half, half]}},
+          {"gpt-image-1", %{"image" => half, "mask" => half}}
+        ] do
+      {result, read_calls} = image_file_reads(fn -> Images.coerce_edit(Map.merge(payload(), Map.put(inputs, "model", model))) end)
+      assert edit_result_status(result) == :ok
+      assert read_calls > 0
+    end
+  end
+
+  @tag slow: "reads a finite real pipe whose byte count exceeds its stat metadata"
+  test "edit upload limit also bounds actual bytes when file metadata understates them" do
+    supervisor = image_fixture_supervisor()
+    path = Path.join(System.tmp_dir!(), "image-growing-#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm(path) end)
+    assert {"", 0} = System.cmd("mkfifo", [path])
+    assert {:ok, %{size: 0}} = File.stat(path)
+    upload = %Plug.Upload{path: path, filename: "sample.png", content_type: "image/png"}
+
+    half = sized_upload(div(@edit_upload_limit, 2))
+
+    for {inputs, bytes} <- [
+          {%{"image" => upload}, @edit_upload_limit + 1},
+          {%{"image[]" => [half, upload]}, div(@edit_upload_limit, 2) + 1},
+          {%{"image" => half, "mask" => upload}, div(@edit_upload_limit, 2) + 1}
+        ] do
+      {writer, monitor} = start_image_writer(supervisor, path, bytes)
+
+      try do
+        result = Images.coerce_edit(Map.merge(payload(), inputs))
+        assert_receive {:DOWN, ^monitor, :process, ^writer, :normal}, @fixture_detection_timeout_ms
+        assert edit_result_status(result) == {413, "request_too_large"}
+      after
+        stop_image_fixture_child(supervisor, writer)
+        Process.demonitor(monitor, [:flush])
+      end
+    end
+  end
+
+  test "image fixture supervision stops a pending writer and collector before file cleanup" do
+    supervisor_id = make_ref()
+    supervisor = image_fixture_supervisor(supervisor_id)
+    path = Path.join(System.tmp_dir!(), "image-partial-#{System.unique_integer([:positive])}")
+    sibling = path <> "-unrelated"
+    on_exit(fn -> Enum.each([path, sibling], &File.rm/1) end)
+    File.touch!(sibling)
+    assert {"", 0} = System.cmd("mkfifo", [path])
+    {writer, writer_monitor} = start_image_writer(supervisor, path, 1)
+    {:ok, collector} = Task.Supervisor.start_child(supervisor, fn -> collect_image_reads(0) end)
+    collector_monitor = Process.monitor(collector)
+
+    stop_supervised!(supervisor_id)
+    assert_receive {:DOWN, ^writer_monitor, :process, ^writer, :shutdown}, @fixture_detection_timeout_ms
+    assert_receive {:DOWN, ^collector_monitor, :process, ^collector, :shutdown}, @fixture_detection_timeout_ms
+    assert :ok = File.rm(path)
+    refute File.exists?(path)
+    assert File.exists?(sibling)
+  end
+
+  test "image read tracing tears down its session and collector after a callback assertion" do
+    supervisor = image_fixture_supervisor()
+    sessions_before = :trace.session_info(self())
+
+    assert_raise ExUnit.AssertionError, fn ->
+      image_file_reads(fn -> flunk("controlled image trace callback failure") end, supervisor)
+    end
+
+    assert Task.Supervisor.children(supervisor) == []
+    assert :trace.session_info(self()) == sessions_before
+  end
+
+  defp image_fixture_supervisor(id \\ make_ref()) do
+    start_supervised!({Task.Supervisor, []}, id: id)
+  end
+
+  defp start_image_writer(supervisor, path, bytes) do
+    owner = self()
+
+    {:ok, writer} =
+      Task.Supervisor.start_child(supervisor, fn ->
+        send(owner, {:image_writer_started, self()})
+        # A raw writer leaves the file server free to open the reader.
+        File.open!(path, [:write, :binary, :raw], fn file ->
+          :ok = :file.write(file, :binary.copy(<<0>>, bytes))
+        end)
+      end)
+
+    monitor = Process.monitor(writer)
+    assert_receive {:image_writer_started, ^writer}, @fixture_detection_timeout_ms
+    {writer, monitor}
+  end
+
+  defp stop_image_fixture_child(supervisor, pid) do
+    case Task.Supervisor.terminate_child(supervisor, pid) do
+      :ok -> :ok
+      {:error, :not_found} -> :ok
+    end
+  end
+
+  defp edit_result_status({:ok, _response}), do: :ok
+  defp edit_result_status({:error, reason}), do: {reason.status, reason.code}
+
+  defp sized_upload(bytes) do
+    path = Path.join(System.tmp_dir!(), "image-limit-#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm(path) end)
+
+    File.open!(path, [:write, :binary], fn file ->
+      {:ok, _position} = :file.position(file, bytes - 1)
+      :ok = IO.binwrite(file, <<0>>)
+    end)
+
+    %Plug.Upload{path: path, filename: "sample.png", content_type: "image/png"}
+  end
+
+  defp image_file_reads(fun, supervisor \\ image_fixture_supervisor()) do
+    session_name = :"image_upload_trace_#{System.unique_integer([:positive])}"
+    on_exit(fn -> destroy_image_trace_sessions(session_name) end)
+    {:ok, collector} = Task.Supervisor.start_child(supervisor, fn -> collect_image_reads(0) end)
+    monitor = Process.monitor(collector)
+    session = :trace.session_create(session_name, collector, [])
+
+    try do
+      for mfa <- [{:file, :read_file, 2}, {:file, :open, 2}] do
+        1 = :trace.function(session, mfa, true, [:global])
+      end
+
+      1 = :trace.process(session, self(), true, [:call, :arity])
+      result = fun.()
+      delivered = :trace.delivered(session, self())
+      assert_receive {:trace_delivered, _tracee, ^delivered}, @fixture_detection_timeout_ms
+      send(collector, {:count, self()})
+      assert_receive {:image_read_count, count}, @fixture_detection_timeout_ms
+      assert_receive {:DOWN, ^monitor, :process, ^collector, :normal}, @fixture_detection_timeout_ms
+      {result, count}
+    after
+      :trace.session_destroy(session)
+      stop_image_fixture_child(supervisor, collector)
+      Process.demonitor(monitor, [:flush])
+    end
+  end
+
+  defp destroy_image_trace_sessions(name) do
+    for {^name, _id} = session <- :trace.session_info(:all) do
+      :trace.session_destroy(session)
+    end
+  end
+
+  defp collect_image_reads(count) do
+    receive do
+      {:trace, _pid, :call, _mfa} -> collect_image_reads(count + 1)
+      {:count, from} -> send(from, {:image_read_count, count})
+    end
+  end
 
   test "GPT Image 2.5 preserves extended qualities and custom size boundaries" do
     for model <- @image_25_models,

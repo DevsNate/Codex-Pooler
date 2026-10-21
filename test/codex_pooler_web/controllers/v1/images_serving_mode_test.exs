@@ -12,6 +12,34 @@ defmodule CodexPoolerWeb.V1.ImagesServingModeTest do
   alias CodexPooler.Pools.ModelServingOverride
   alias CodexPooler.Repo
 
+  for mode <- ["full", "lite"], shape <- [:single, :array, :mask] do
+    @mode mode
+    @shape shape
+    test "oversized #{@shape} multipart edit is refused before #{@mode} dispatch or reservation", %{conn: conn} do
+      upstream = start_upstream(image_stream(:absent))
+      setup = setup_host(upstream, @mode)
+      limit = 50 * 1024 * 1024
+
+      parts =
+        case @shape do
+          :single -> [{"image", limit + 1}]
+          :array -> [{"image[]", div(limit, 2)}, {"image[]", div(limit, 2) + 1}]
+          :mask -> [{"image", div(limit, 2)}, {"mask", div(limit, 2) + 1}]
+        end
+
+      response =
+        conn
+        |> auth(setup)
+        |> put_req_header("content-type", "multipart/form-data; boundary=image-limit")
+        |> post("/v1/images/edits", edit_upload_multipart(parts))
+
+      assert %{"error" => %{"code" => "request_too_large", "param" => "image"}} = json_response(response, 413)
+      assert FakeUpstream.count(upstream) == 0
+      assert Repo.aggregate(from(r in Request, where: r.pool_id == ^setup.pool.id), :count) == 0
+      assert Repo.aggregate(from(e in LedgerEntry, where: e.pool_id == ^setup.pool.id), :count) == 0
+    end
+  end
+
   for mode <- ["full", "lite"], operation <- ["generations", "edits"] do
     @mode mode
     @operation operation
@@ -440,6 +468,24 @@ defmodule CodexPoolerWeb.V1.ImagesServingModeTest do
       end
 
     IO.iodata_to_binary([fields, image, "--#{boundary}--\r\n"])
+  end
+
+  defp edit_upload_multipart(parts) do
+    fields =
+      for {key, value} <- [{"model", "gpt-image-1"}, {"prompt", "synthetic image"}] do
+        "--image-limit\r\nContent-Disposition: form-data; name=\"#{key}\"\r\n\r\n#{value}\r\n"
+      end
+
+    files =
+      for {key, bytes} <- parts do
+        [
+          "--image-limit\r\nContent-Disposition: form-data; name=\"#{key}\"; filename=\"sample.png\"\r\nContent-Type: image/png\r\n\r\n",
+          :binary.copy(<<0>>, bytes),
+          "\r\n"
+        ]
+      end
+
+    IO.iodata_to_binary([fields, files, "--image-limit--\r\n"])
   end
 
   defp image_tools(payload, "full"), do: payload["tools"]
