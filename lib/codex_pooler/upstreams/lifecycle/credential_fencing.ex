@@ -322,7 +322,7 @@ defmodule CodexPooler.Upstreams.Lifecycle.CredentialFencing do
         is_nil(identity) ->
           Repo.rollback(:upstream_identity_not_found)
 
-        not current_fence?(identity, fence) ->
+        not current_fence?(identity, fence) or not definitive_rejection_applicable?(identity) ->
           {:superseded, identity}
 
         true ->
@@ -333,6 +333,7 @@ defmodule CodexPooler.Upstreams.Lifecycle.CredentialFencing do
             identity.metadata
             |> applied_metadata(fence)
             |> provider_rejection_metadata(timestamp)
+            |> put_provider_auth_recovery_probe_ceiling()
             |> put_provider_auth_recovery("terminal", timestamp)
             |> put_provider_auth_recovery_assignment_ids(assignments)
 
@@ -659,12 +660,27 @@ defmodule CodexPooler.Upstreams.Lifecycle.CredentialFencing do
 
   defp usage_success_status_allowed?(%UpstreamIdentity{status: @reauth_required} = identity, fence) do
     metadata = initialize_metadata(identity.metadata)
+    recovery = Map.get(metadata, @provider_auth_recovery_key, %{})
 
     metadata[@credential_epoch_key] == fence.credential_epoch and
-      provider_auth_recovery_status(metadata) in ["awaiting_fresh_quota", "recovered"]
+      (provider_auth_recovery_status(metadata) in ["awaiting_fresh_quota", "recovered"] or
+         (provider_auth_recovery_status(metadata) == "terminal" and
+            recovery["max_pre_rejection_credential_epoch"] == fence.credential_epoch and
+            is_integer(recovery["max_pre_rejection_probe_sequence"]) and
+            fence.usage_probe_sequence <= recovery["max_pre_rejection_probe_sequence"]))
   end
 
   defp usage_success_status_allowed?(_identity, _fence), do: true
+
+  defp definitive_rejection_applicable?(%UpstreamIdentity{status: @reauth_required} = identity) do
+    provider_auth_recovery_status(initialize_metadata(identity.metadata)) in [
+      "terminal",
+      "awaiting_fresh_quota",
+      "recovered"
+    ]
+  end
+
+  defp definitive_rejection_applicable?(_identity), do: true
 
   defp usage_success_applicable?(identity, fence) do
     not Map.has_key?(identity.metadata || %{}, "permanent_deletion_requested_at") and
@@ -819,6 +835,27 @@ defmodule CodexPooler.Upstreams.Lifecycle.CredentialFencing do
     Map.update!(metadata, @provider_auth_recovery_key, fn recovery ->
       Map.put(recovery, "demoted_assignment_ids", assignment_ids)
     end)
+  end
+
+  defp put_provider_auth_recovery_probe_ceiling(metadata) do
+    recovery = Map.get(metadata, @provider_auth_recovery_key, %{})
+    current_sequence = initialize_metadata(metadata)[@probe_sequence_key]
+    current_epoch = initialize_metadata(metadata)[@credential_epoch_key]
+    previous_ceiling = recovery["max_pre_rejection_probe_sequence"]
+    previous_epoch = recovery["max_pre_rejection_credential_epoch"]
+    previous_status = recovery["status"]
+
+    ceiling =
+      if previous_status == "terminal" and previous_epoch == current_epoch and is_integer(previous_ceiling),
+        do: min(previous_ceiling, current_sequence),
+        else: current_sequence
+
+    recovery =
+      recovery
+      |> Map.put("max_pre_rejection_credential_epoch", current_epoch)
+      |> Map.put("max_pre_rejection_probe_sequence", ceiling)
+
+    Map.put(metadata, @provider_auth_recovery_key, recovery)
   end
 
   defp maybe_put_terminal_provider_auth_rejection(recovery, metadata) do

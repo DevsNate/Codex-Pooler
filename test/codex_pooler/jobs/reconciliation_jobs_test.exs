@@ -3619,6 +3619,62 @@ defmodule CodexPooler.Jobs.ReconciliationJobsTest do
       refute_received :stale_terminal_callback_ran
     end
 
+    test "new usage probes allocated after definitive rejection stay superseded" do
+      {_pool, assignment} = active_assignment_fixture(%{})
+      identity = Upstreams.get_upstream_identity(assignment.upstream_identity_id)
+
+      assert {:ok, _identity, rejection_fence} = CredentialFencing.allocate_usage_probe(identity)
+      assert {:ok, :applied, rejected_identity} = CredentialFencing.mark_definitive_rejection(identity, rejection_fence)
+      assert rejected_identity.status == "reauth_required"
+
+      assert {:ok, _identity, fresh_fence} = CredentialFencing.allocate_usage_probe(rejected_identity)
+
+      assert {:ok, :applied, repeated_rejection} =
+               CredentialFencing.mark_definitive_rejection(rejected_identity, fresh_fence)
+
+      assert repeated_rejection.metadata["provider_auth_recovery"]["max_pre_rejection_probe_sequence"] ==
+               rejection_fence.usage_probe_sequence
+
+      assert {:ok, :superseded, still_rejected, nil} =
+               CredentialFencing.apply_usage_success(
+                 repeated_rejection,
+                 fresh_fence,
+                 fn _locked_identity -> flunk("post-rejection usage probe applied") end
+               )
+
+      assert still_rejected.status == "reauth_required"
+    end
+
+    test "same-epoch recovery starts a new terminal ceiling for its next cohort" do
+      {_pool, assignment} = active_assignment_fixture(%{})
+      identity = Upstreams.get_upstream_identity(assignment.upstream_identity_id)
+
+      assert {:ok, _identity, first_rejection_fence} = CredentialFencing.allocate_usage_probe(identity)
+      assert {:ok, _identity, first_success_fence} = CredentialFencing.allocate_usage_probe(identity)
+      assert {:ok, :applied, first_rejected} = CredentialFencing.mark_definitive_rejection(identity, first_rejection_fence)
+
+      assert {:ok, :applied, recovered_identity, :recovered} =
+               CredentialFencing.apply_usage_success(first_rejected, first_success_fence, fn _ -> {:ok, :recovered} end)
+
+      assert recovered_identity.status == "active"
+      assert {:ok, _identity, second_rejection_fence} = CredentialFencing.allocate_usage_probe(recovered_identity)
+      assert {:ok, _identity, second_success_fence} = CredentialFencing.allocate_usage_probe(recovered_identity)
+      assert {:ok, :applied, second_rejected} = CredentialFencing.mark_definitive_rejection(recovered_identity, second_rejection_fence)
+
+      assert second_rejected.metadata["provider_auth_recovery"]["max_pre_rejection_probe_sequence"] ==
+               second_success_fence.usage_probe_sequence
+
+      assert {:ok, _identity, post_terminal_fence} = CredentialFencing.allocate_usage_probe(second_rejected)
+
+      assert {:ok, :superseded, _still_terminal, nil} =
+               CredentialFencing.apply_usage_success(second_rejected, post_terminal_fence, fn _ -> flunk("post-terminal cohort probe applied") end)
+
+      assert {:ok, :applied, recovered_again, :recovered} =
+               CredentialFencing.apply_usage_success(second_rejected, second_success_fence, fn _ -> {:ok, :recovered} end)
+
+      assert recovered_again.status == "active"
+    end
+
     test "newer unavailable pool completion cannot run after an older rejection applies" do
       {_pool, assignment} = active_assignment_fixture(%{})
       identity = Upstreams.get_upstream_identity(assignment.upstream_identity_id)

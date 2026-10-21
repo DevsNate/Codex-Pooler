@@ -852,6 +852,29 @@ defmodule CodexPooler.Upstreams.Auth.TokenRefreshTest do
       assert Repo.get!(Oban.Job, job.id).state == "completed"
     end
 
+    @tag :refresh_usage_overlap
+    test "delayed usage rejection cannot recreate recovery after terminal refresh rejection" do
+      upstream = start_path_upstream(%{"/oauth/token" => {400, %{"error" => "invalid_grant"}}})
+      identity = refreshable_identity_fixture("active", %{"base_url" => FakeUpstream.url(upstream)})
+      store_secret!(identity, "access_token", secret("access", "delayed-rejection"))
+      store_secret!(identity, "refresh_token", secret("refresh", "delayed-rejection"))
+      _assignment = active_assignment_for_identity!(identity)
+
+      assert {:ok, _identity, fence} = CredentialFencing.allocate_usage_probe(identity)
+      assert {:ok, %{status: :reauth_required}} = TokenRefresh.refresh_access_token(identity, trigger_kind: "unit_test")
+
+      terminal = Repo.reload!(identity)
+      assert terminal.status == "reauth_required"
+      assert is_nil(terminal.metadata["provider_auth_recovery"])
+
+      assert {:ok, :superseded, still_terminal} = CredentialFencing.mark_definitive_rejection(terminal, fence)
+      assert still_terminal.status == "reauth_required"
+      assert is_nil(still_terminal.metadata["provider_auth_recovery"])
+
+      assert {:ok, :superseded, _still_terminal, nil} =
+               CredentialFencing.apply_usage_success(terminal, fence, fn _locked -> flunk("delayed usage success applied") end)
+    end
+
     test "usage success preserves paused monitoring state and disabled timestamp" do
       identity = refreshable_identity_fixture("paused")
       disabled_at = DateTime.utc_now()
