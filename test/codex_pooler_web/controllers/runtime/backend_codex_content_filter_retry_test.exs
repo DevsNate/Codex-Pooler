@@ -170,6 +170,28 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexContentFilterRetryTest do
     end
   end
 
+  test "terminal write hold observes the peer close after a real Pong consumes its active read" do
+    {client, server, hold, task, monitor} = start_parked_pong_connection!(false)
+    port_monitor = Port.monitor(server)
+    :ok = :gen_tcp.close(client)
+    assert_receive {:DOWN, ^port_monitor, :port, ^server, _reason}, @budget
+    send(task.pid, {hold, :release})
+    assert {:closed, true} = Task.await(task, @budget)
+    assert_receive {:DOWN, ^monitor, :process, _, :normal}, @budget
+  end
+
+  for active <- [false, :once] do
+    @tag active: active
+    test "terminal write hold restores live TCP active mode #{inspect(active)}", context do
+      {client, server, hold, task, monitor} = start_parked_pong_connection!(context.active)
+      assert {:ok, [active: true]} = :inet.getopts(server, [:active])
+      send(task.pid, {hold, :release})
+      assert {context.active, true} == Task.await(task, @budget)
+      assert_receive {:DOWN, ^monitor, :process, _, :normal}, @budget
+      :ok = :gen_tcp.close(client)
+    end
+  end
+
   # Codex closes its connection right after reading a content-filter terminal. The socket confirms what it pushed at its next callback and again at `terminate/2`, and a close that wins that race takes the connection's port with it, where the driver queue can no longer be read (findings#303 row 303-4). The race is held open at Bandit's write of the terminal: a telemetry handler runs in the socket's own connection process right after that write, parks it until the client's close has taken the port, and only then lets it reach its next callback.
   for mode <- ["full", "lite"], forwarding? <- [false, true] do
     @tag mode: mode, forwarding?: forwarding?
@@ -1169,15 +1191,24 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexContentFilterRetryTest do
   # Runs in the socket's connection process right after Bandit wrote a frame (ThousandIsland reports each successful write synchronously, in that process): the frame that carries the content-filter terminal parks the process until the test releases it, or until the test is gone. The socket is the one process of the listener subscribed to its Pool's events. With `hold_after_terminal_write!/1` the write watch's own send handler, attached when the application boots, must read the write's driver queue before this one parks the process, so the arm holds the race between that reading and the socket's next callback; `hold_before_write_watch_read!/1` puts the watch's handler behind this one, so the watch reads only after the client's close took the port (findings#315). Telemetry calls handlers in attachment order without promising it (`:telemetry.persist/0` reverses it), so each hold asserts its order, which `:telemetry.list_handlers/1` reports as dispatched.
   def park_after_terminal_write(_event, %{data: data}, _metadata, %{test: test, topic: topic, hold: hold}) do
     if String.contains?(IO.iodata_to_binary(data), "response.incomplete") and List.keymember?(Registry.lookup(CodexPooler.PubSub, topic), self(), 0) do
+      port = connection_port!(self())
+      {:ok, [active: active]} = :inet.getopts(port, [:active])
       test_monitor = Process.monitor(test)
-      send(test, {:terminal_written, hold, self()})
 
-      receive do
-        {^hold, :release} -> :ok
-        {:DOWN, ^test_monitor, :process, ^test, _reason} -> :ok
+      try do
+        # A prior Pong can consume active:once while this callback is parked.
+        # Keep reading TCP so the real peer close can take the port first.
+        :ok = :inet.setopts(port, active: true)
+        send(test, {:terminal_written, hold, self()})
+
+        receive do
+          {^hold, :release} -> :ok
+          {:DOWN, ^test_monitor, :process, ^test, _reason} -> :ok
+        end
+      after
+        Process.demonitor(test_monitor, [:flush])
+        restore_connection_active!(port, active)
       end
-
-      Process.demonitor(test_monitor, [:flush])
     end
 
     :ok
@@ -1211,6 +1242,101 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexContentFilterRetryTest do
     :ok = CodexPoolerWeb.WebsocketDownstreamWriteWatch.attach()
     assert [^handler_id, ^watch] = for(%{id: id} <- :telemetry.list_handlers([:thousand_island, :connection, :send]), id in [watch, handler_id], do: id)
     hold
+  end
+
+  defp restore_connection_active!(port, active) do
+    case :inet.setopts(port, active: active) do
+      :ok -> :ok
+      {:error, :einval} -> assert is_nil(Port.info(port))
+    end
+  end
+
+  defp start_parked_pong_connection!(previous_active) do
+    test = self()
+    hold = make_ref()
+    topic = "content-filter-terminal-hold:#{System.unique_integer([:positive])}"
+    ping = "synthetic-ping"
+    mask = :crypto.strong_rand_bytes(4)
+    masked = for {byte, index} <- Enum.with_index(:binary.bin_to_list(ping)), into: <<>>, do: <<Bitwise.bxor(byte, :binary.at(mask, rem(index, 4)))>>
+    pong = <<0x8A, 1::1, byte_size(ping)::7, mask::binary, masked::binary>>
+    terminal = "response.incomplete"
+
+    task =
+      Task.Supervisor.async_nolink(start_supervised!(Task.Supervisor), fn ->
+        {:ok, listener} = :gen_tcp.listen(0, [:binary, ip: {127, 0, 0, 1}, active: false, reuseaddr: true])
+        {:ok, {_address, port}} = :inet.sockname(listener)
+        send(test, {:listener_ready, hold, port})
+        {:ok, server} = :gen_tcp.accept(listener, @budget)
+        :ok = :gen_tcp.close(listener)
+        :ok = Phoenix.PubSub.subscribe(CodexPooler.PubSub, topic)
+        :ok = :inet.setopts(server, active: :once)
+        :ok = :gen_tcp.send(server, <<0x89, byte_size(ping), ping::binary>>)
+        send(test, {:ping_written, hold, server})
+
+        receive do
+          {^hold, :park} -> :ok
+        after
+          @budget -> flunk("the real Pong never reached the owned TCP connection")
+        end
+
+        :ok = :inet.setopts(server, active: previous_active)
+        :ok = :gen_tcp.send(server, <<0x81, byte_size(terminal), terminal::binary>>)
+        :ok = park_after_terminal_write([], %{data: terminal}, %{}, %{test: test, topic: topic, hold: hold})
+
+        restored_active =
+          case :inet.getopts(server, [:active]) do
+            {:ok, [active: active]} -> active
+            {:error, :einval} -> :closed
+          end
+
+        received_pong = receive_held_tcp_bytes!(server, byte_size(pong), <<>>)
+        {restored_active, received_pong == pong}
+      end)
+
+    monitor = Process.monitor(task.pid)
+    assert_receive {:listener_ready, ^hold, port}, @budget
+    {:ok, client} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false], @budget)
+    on_exit(fn -> :gen_tcp.close(client) end)
+    assert_receive {:ping_written, ^hold, server}, @budget
+    assert {:ok, ping_frame} = :gen_tcp.recv(client, 2 + byte_size(ping), @budget)
+    ping_matches? = ping_frame == <<0x89, byte_size(ping), ping::binary>>
+    assert ping_matches?
+    :ok = :gen_tcp.send(client, pong)
+    await_consumed_active_read!(server, byte_size(pong), System.monotonic_time(:millisecond) + @budget)
+    send(task.pid, {hold, :park})
+    assert_receive {:terminal_written, ^hold, socket}, @budget
+    assert socket == task.pid
+    assert {:ok, terminal_frame} = :gen_tcp.recv(client, 2 + byte_size(terminal), @budget)
+    terminal_matches? = terminal_frame == <<0x81, byte_size(terminal), terminal::binary>>
+    assert terminal_matches?
+    {client, server, hold, task, monitor}
+  end
+
+  defp await_consumed_active_read!(server, pong_bytes, deadline) do
+    {:ok, [active: active]} = :inet.getopts(server, [:active])
+    {:ok, [recv_oct: received]} = :inet.getstat(server, [:recv_oct])
+
+    cond do
+      active == false and received == pong_bytes ->
+        :ok
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        flunk("the real Pong did not consume the owned TCP active read")
+
+      true ->
+        Process.sleep(1)
+        await_consumed_active_read!(server, pong_bytes, deadline)
+    end
+  end
+
+  defp receive_held_tcp_bytes!(_server, expected_bytes, bytes) when byte_size(bytes) == expected_bytes, do: bytes
+
+  defp receive_held_tcp_bytes!(server, expected_bytes, bytes) do
+    receive do
+      {:tcp, ^server, data} -> receive_held_tcp_bytes!(server, expected_bytes, bytes <> data)
+    after
+      @budget -> flunk("the actual matching Pong was not left in the held connection's mailbox")
+    end
   end
 
   defp connection_port!(socket) do
