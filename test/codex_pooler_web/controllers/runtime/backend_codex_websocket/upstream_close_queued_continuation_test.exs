@@ -196,7 +196,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.UpstreamCloseQueuedContin
           acc
       end)
 
-    {conn, websocket, Enum.reject(frames, &(match?({:ping, _}, &1) or metadata_control_frame?(&1)))}
+    {conn, websocket, frames} = answer_server_pings!(conn, websocket, ref, frames)
+    {conn, websocket, Enum.reject(frames, &metadata_control_frame?/1)}
   end
 
   defp completed_terminal_frame(response_id) do

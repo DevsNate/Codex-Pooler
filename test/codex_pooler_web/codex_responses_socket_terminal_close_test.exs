@@ -230,7 +230,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocketTerminalCloseTest do
     {_epoch, [%{token: token, kind: :proxy}]} = ActivityRegistry.begin_drain(name: registry)
     send(task, {:deliver, type})
     {conn, types} = receive_frames(conn, websocket, ref)
-    assert types == [type]
+    assert types in [[type], [type, :ping]]
 
     if type == "response.completed" and order == :result_first do
       assert_receive :result_before_terminal_push, @detection_timeout
@@ -311,7 +311,11 @@ defmodule CodexPoolerWeb.CodexResponsesSocketTerminalCloseTest do
     if frames == [] do
       receive_frames(conn, websocket, ref)
     else
-      {conn, Enum.map(frames, fn {:text, data} -> CodexPooler.JSON.decode!(data)["type"] end)}
+      {conn,
+       Enum.map(frames, fn
+         {:text, data} -> CodexPooler.JSON.decode!(data)["type"]
+         {:ping, ""} -> :ping
+       end)}
     end
   end
 end

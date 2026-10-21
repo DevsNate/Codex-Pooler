@@ -243,6 +243,7 @@ defmodule CodexPoolerWeb.Runtime.DrainAfterTerminalScenario do
               acc
           end)
 
+        {conn, websocket, frames} = answer_server_pings!(conn, websocket, client.ref, frames)
         frames ++ receive_frames_for!(%{client | conn: conn, websocket: websocket}, wait_ms)
 
       {tag, ^socket} when tag in [:tcp_closed, :ssl_closed] ->

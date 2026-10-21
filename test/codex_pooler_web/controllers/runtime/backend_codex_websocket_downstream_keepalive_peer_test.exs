@@ -17,11 +17,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketDownstreamKeepalivePeerTes
   # upstream receive timeout to 1 s, so its remote turn budget is 2.5 s. The
   # bound also covers the turn's setup before its first frame (the forward to
   # the peer, the owner's upstream connect), which the client's request frame
-  # starts: on an idle machine the first frame comes 0.1-0.2 s after it, and up
-  # to 0.5 s on the module's first turn, which still warms the peer's fresh
-  # connections. A half-second bound closed the stalled arm before its first
-  # frame when three suites shared the CI node (Drone 1809), and the long arm
-  # before its end (Drone 1809, 1811).
+  # starts. Admission and a peer's fresh connection can consume most of the
+  # bound before first progress. The late-start arms below establish that
+  # phase through real empty ticks and the driver's read deadline, then verify
+  # that the first progress Ping reaches a responsive client in time.
   use CodexPoolerWeb.ConnCase, async: false
 
   alias CodexPooler.Platform.ExecutionRegistry
@@ -35,6 +34,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketDownstreamKeepalivePeerTes
     only: [enter_peer_owner_topology!: 0, start_shared_bridge_peer!: 0]
 
   import CodexPoolerWeb.Runtime.DownstreamKeepaliveScenario
+  import CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport, only: [model_serving_scope: 0, set_model_serving_mode!: 3]
 
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Gateway.Runtime.NativeResponseSteering
@@ -57,6 +57,24 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketDownstreamKeepalivePeerTes
   setup %{settings: settings} do
     :ok = put_settings!(settings, true)
     enter_peer_owner_topology!()
+  end
+
+  for mode <- ["full", "lite"] do
+    @tag late_first_progress: true
+    @tag settings: [websocket_idle_timeout_ms: @idle_timeout_ms, upstream_receive_timeout_ms: @receive_timeout_ms]
+    @tag slow: "two actual empty keepalive ticks precede late first progress and a client Pong delayed by 50 ms"
+    test "peer owner #{mode}: late first progress keeps the responsive client open", %{peer_node: peer_node} do
+      scope = model_serving_scope()
+      upstream = start_upstream(FakeUpstream.delayed_sse_stream(stream_events("resp_peer_late_first_progress", 3), interval_ms: @frame_interval_ms))
+      setup = gateway_setup(upstream)
+      set_model_serving_mode!(scope, setup, unquote(mode))
+      %{turn: turn, request: request} = assert_late_start_completed!(setup, peer_node: peer_node)
+      assert node(turn.client.owner) == peer_node
+      assert %{"owner_instance_id" => owner, "proxy_instance_id" => proxy} = request.request_metadata["websocket_owner_forwarding"]
+      assert owner != proxy
+      assert FakeUpstream.count(upstream) == 1
+      FakeUpstream.verify!(upstream)
+    end
   end
 
   @tag settings: [websocket_idle_timeout_ms: @idle_timeout_ms]

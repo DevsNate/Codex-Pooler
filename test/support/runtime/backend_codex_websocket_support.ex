@@ -924,27 +924,32 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport do
   end
 
   defp released_client_responses(client, responses, deadline) do
-    Enum.reduce_while(responses, {:cont, client}, fn
-      {:data, ref, data}, {:cont, client} when ref == client.ref ->
-        {:ok, websocket, frames} = Mint.WebSocket.decode(client.websocket, data)
-        client = %{client | websocket: websocket}
+    {websocket, frames} =
+      Enum.reduce(responses, {client.websocket, []}, fn
+        {:data, ref, data}, {websocket, frames} when ref == client.ref ->
+          {:ok, websocket, decoded} = Mint.WebSocket.decode(websocket, data)
+          {websocket, Enum.reverse(decoded, frames)}
 
-        case released_client_frames_outcome(frames) do
-          {:terminal, type} -> {:halt, {:terminal, client, type}}
-          {:closed, code, reason} -> {:halt, {:closed, client, code, reason}}
-          :continue -> {:cont, {:cont, client}}
+        _part, acc ->
+          acc
+      end)
+
+    {conn, websocket, frames} = answer_server_pings!(client.conn, websocket, client.ref, Enum.reverse(frames))
+    client = %{client | conn: conn, websocket: websocket}
+
+    case released_client_frames_outcome(frames) do
+      {:terminal, type} ->
+        {:terminal, client, type}
+
+      {:closed, code, reason} ->
+        {:closed, client, code, reason}
+
+      :continue ->
+        cond do
+          {:done, client.ref} in responses -> {:closed, client, nil, "done"}
+          deadline == :no_wait -> :continue
+          true -> receive_released_client_outcome(client, deadline)
         end
-
-      {:done, ref}, {:cont, client} when ref == client.ref ->
-        {:halt, {:closed, client, nil, "done"}}
-
-      _part, acc ->
-        {:cont, acc}
-    end)
-    |> case do
-      {:cont, _client} when deadline == :no_wait -> :continue
-      {:cont, client} -> receive_released_client_outcome(client, deadline)
-      outcome -> outcome
     end
   end
 
@@ -1010,12 +1015,13 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport do
 
     case Mint.WebSocket.stream(conn, message) do
       {:ok, conn, responses} ->
-        {websocket, pong?} =
-          Enum.reduce(responses, {websocket, false}, fn
-            {:data, ^ref, data}, {websocket, pong?} ->
+        {conn, websocket, pong?} =
+          Enum.reduce(responses, {conn, websocket, false}, fn
+            {:data, ^ref, data}, {conn, websocket, pong?} ->
               assert {:ok, websocket, frames} = Mint.WebSocket.decode(websocket, data)
+              {conn, websocket, frames} = answer_server_pings!(conn, websocket, ref, frames)
               assert Enum.reject(frames, &(&1 == {:pong, payload} or metadata_control_frame?(&1))) == []
-              {websocket, pong? or {:pong, payload} in frames}
+              {conn, websocket, pong? or {:pong, payload} in frames}
 
             _response, acc ->
               acc
@@ -1042,11 +1048,12 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport do
 
     case Mint.WebSocket.stream(conn, message) do
       {:ok, conn, responses} ->
-        {websocket, frames} =
-          Enum.reduce(responses, {websocket, frames}, fn
-            {:data, ^ref, data}, {websocket, frames} ->
+        {conn, websocket, frames} =
+          Enum.reduce(responses, {conn, websocket, frames}, fn
+            {:data, ^ref, data}, {conn, websocket, frames} ->
               assert {:ok, websocket, decoded} = Mint.WebSocket.decode(websocket, data)
-              {websocket, frames ++ Enum.reject(decoded, &metadata_control_frame?/1)}
+              {conn, websocket, frames} = answer_server_pings!(conn, websocket, ref, frames ++ decoded)
+              {conn, websocket, Enum.reject(frames, &metadata_control_frame?/1)}
 
             _response, acc ->
               acc

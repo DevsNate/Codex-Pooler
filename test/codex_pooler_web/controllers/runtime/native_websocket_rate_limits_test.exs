@@ -180,11 +180,12 @@ defmodule CodexPoolerWeb.Runtime.NativeWebsocketRateLimitsTest do
 
     case Mint.WebSocket.stream(conn, message) do
       {:ok, conn, responses} ->
-        {websocket, texts} =
-          Enum.reduce(responses, {websocket, texts}, fn
-            {:data, ^ref, data}, {websocket, texts} ->
+        {conn, websocket, texts} =
+          Enum.reduce(responses, {conn, websocket, texts}, fn
+            {:data, ^ref, data}, {conn, websocket, texts} ->
               assert {:ok, websocket, frames} = Mint.WebSocket.decode(websocket, data)
-              {websocket, texts ++ Enum.map(frames, &text_frame!/1)}
+              {conn, websocket, frames} = answer_server_pings!(conn, websocket, ref, frames)
+              {conn, websocket, texts ++ Enum.map(frames, &text_frame!/1)}
 
             _response, acc ->
               acc

@@ -3,9 +3,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.DownstreamKeepaliveTest d
   # the client re-arm, and the released client sends nothing while a response
   # streams: a turn streaming longer than `websocket_idle_timeout_ms` was closed
   # in the middle (close 1002) and settled `client_disconnected` (findings#302).
-  # The socket now pings the client at every third of the bound while a turn
-  # delivers frames, and the client's pong re-arms the timer; a turn that stops
-  # delivering gets no ping and is still closed by the bound.
+  # The first delivered frame triggers a Ping immediately; subsequent progress
+  # pings at every third of the bound. The client's Pong re-arms the timer; a
+  # turn that stops delivering gets no further ping and is closed by the bound.
   #
   # Topology: the real public listener and a Mint client, FakeUpstream pacing
   # the provider's frames on the upstream websocket, the Pool's default mode
@@ -21,6 +21,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.DownstreamKeepaliveTest d
   import ExUnit.CaptureLog
   import CodexPoolerWeb.Runtime.BackendCodexTestSupport, only: [gateway_setup: 1, register_unboxed_pool_cleanup!: 1, start_upstream: 1]
   import CodexPoolerWeb.Runtime.DownstreamKeepaliveScenario
+  import CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport, only: [model_serving_scope: 0, set_model_serving_mode!: 3]
 
   alias CodexPooler.Accounting.{LedgerEntry, Request, RequestOutcome}
   alias CodexPooler.Events
@@ -42,6 +43,37 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.DownstreamKeepaliveTest d
     on_exit(fn -> Sandbox.mode(Repo, :manual) end)
     :ok = Sandbox.mode(Repo, :auto)
     put_settings!([websocket_idle_timeout_ms: @idle_timeout_ms], forwarding?)
+  end
+
+  for forwarding? <- [false, true], mode <- ["full", "lite"] do
+    topology = if forwarding?, do: "local owner", else: "direct"
+
+    @tag forwarding: forwarding?
+    @tag late_first_progress: true
+    @tag slow: "two actual empty keepalive ticks precede late first progress and a client Pong delayed by 50 ms"
+    test "#{topology} #{mode}: late first progress keeps the responsive client open" do
+      assert_late_start!(unquote(forwarding?), unquote(mode))
+    end
+  end
+
+  defp assert_late_start!(forwarding?, mode) do
+    put_settings!([websocket_idle_timeout_ms: 1_500, upstream_receive_timeout_ms: 1_000], forwarding?)
+    scope = model_serving_scope()
+    upstream = start_upstream(FakeUpstream.delayed_sse_stream(stream_events("resp_late_first_progress", 3), interval_ms: @frame_interval_ms))
+    setup = committed_gateway_setup!(upstream)
+    set_model_serving_mode!(scope, setup, mode)
+    %{turn: turn, request: request} = assert_late_start_completed!(setup)
+    assert is_nil(turn.client.owner)
+
+    if forwarding? do
+      assert %{"owner_instance_id" => owner, "proxy_instance_id" => proxy} = request.request_metadata["websocket_owner_forwarding"]
+      assert owner == proxy
+    else
+      refute Map.has_key?(request.request_metadata, "websocket_owner_forwarding")
+    end
+
+    assert FakeUpstream.count(upstream) == 1
+    FakeUpstream.verify!(upstream)
   end
 
   for forwarding? <- [false, true] do

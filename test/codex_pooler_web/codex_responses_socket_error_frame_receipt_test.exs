@@ -72,6 +72,29 @@ defmodule CodexPoolerWeb.CodexResponsesSocketErrorFrameReceiptTest do
     assert %{"outcome" => "aborted", "terminal_class" => "none", "frames_after_visible" => 1, "write_failure" => "closed"} = receipt(attempt)
   end
 
+  test "a failed first Ping preserves the terminal already confirmed at its callback", %{task_pid: task_pid, attempt: attempt, state: state} do
+    frame = ~s({"type":"response.completed","response":{"id":"resp_fixture","status":"completed"}})
+    assert {:push, {:text, ^frame}, state} = CodexResponsesSocket.handle_info({:codex_response_chunk, task_pid, frame}, state)
+    assert_receive {CodexResponsesSocket, :first_downstream_keepalive, {:task, ^task_pid}} = ping
+    assert {:push, {:ping, ""}, state} = CodexResponsesSocket.handle_info(ping, state)
+    send_error(:closed)
+    stop_fixture_task!(task_pid)
+    assert :ok = CodexResponsesSocket.terminate(:normal, state)
+    assert %{"outcome" => "delivered", "terminal_class" => "response.completed", "frames_after_visible" => 1} = stored = receipt(attempt)
+    refute Map.has_key?(stored, "write_failure")
+  end
+
+  test "a failed first terminal write never becomes delivered through the queued Ping", %{task_pid: task_pid, attempt: attempt, state: state} do
+    frame = ~s({"type":"response.completed","response":{"id":"resp_fixture","status":"completed"}})
+    assert {:push, {:text, ^frame}, state} = CodexResponsesSocket.handle_info({:codex_response_chunk, task_pid, frame}, state)
+    assert_receive {CodexResponsesSocket, :first_downstream_keepalive, {:task, ^task_pid}} = ping
+    send_error(:closed)
+    assert {:ok, ^state} = CodexResponsesSocket.handle_info(ping, state)
+    stop_fixture_task!(task_pid)
+    assert :ok = CodexResponsesSocket.terminate(:normal, state)
+    assert %{"outcome" => "aborted", "terminal_class" => "none", "frames_after_visible" => 0, "write_failure" => "closed"} = receipt(attempt)
+  end
+
   test "unknown termination writes no unrelated Attempt when the binding is missing or the task is removed", %{task_pid: task_pid, attempt: attempt, state: state} do
     stop_fixture_task!(task_pid)
 

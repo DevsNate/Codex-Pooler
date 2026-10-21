@@ -77,10 +77,11 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   # `websocket_idle_timeout_ms`. ThousandIsland re-arms it only on bytes from
   # the client, never on a frame this socket pushes, and the released client
   # sends nothing while it reads a response, so a turn streaming longer than the
-  # bound was closed in the middle (findings#302). Every third of the bound the
-  # socket pings the client when a turn delivered client-visible frames since
-  # the previous tick: the client's pong re-arms the read timer. A turn that
-  # showed nothing gets no ping, so a stalled turn is still closed by the bound.
+  # bound was closed in the middle (findings#302). The first delivered frame
+  # immediately pings the client; every third of the bound the socket pings
+  # again only for later frames delivered since the previous tick. The client's
+  # pong re-arms the read timer. No output buys no ping, and a single frame
+  # cannot buy a second extension at the following tick.
   # The same tick tells each owner-forwarded task that progressed
   # (`DownstreamProgress`): a remote owner's submission waits on those notices.
   # The tick carries the counts it saw instead of keeping them in the state
@@ -113,6 +114,45 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
 
   defp progressed_tasks(delivered_frames, previous_frames),
     do: for({task, frames} <- delivered_frames, frames > Map.get(previous_frames, task, 0), do: task)
+
+  # Queue the first Ping immediately, but let Bandit write the data before
+  # the next callback confirms its receipt. Batching data and Ping would lose
+  # a successfully written terminal if the client closes before the Ping write.
+  defp schedule_first_downstream_progress({:push, _messages, next_state} = result, state) do
+    previous = first_keepalive_frames_by_identity(state)
+
+    for {identity, frames} <- first_keepalive_frames_by_identity(next_state),
+        frames > 0 and Map.get(previous, identity, 0) == 0 do
+      send(self(), {__MODULE__, :first_downstream_keepalive, identity})
+    end
+
+    result
+  end
+
+  defp schedule_first_downstream_progress(result, _state), do: result
+
+  defp first_keepalive_frames_by_identity(state) do
+    frames = Map.new(Map.get(state, :downstream_delivery_evidence, %{}), fn {task, evidence} -> {{:task, task}, Map.get(evidence, :frames, 0)} end)
+
+    case Map.get(state, :native_response_steering_active) do
+      %{identity: identity, evidence: evidence} -> Map.put(frames, {:steering, state.native_response_steering, identity}, evidence.frames)
+      _none -> frames
+    end
+  end
+
+  defp first_keepalive_current?({:task, task} = identity, state),
+    do: response_task_delivery_candidate?(state, task) and Map.get(first_keepalive_frames_by_identity(state), identity, 0) > 0
+
+  defp first_keepalive_current?({:steering, _lane, _identity} = identity, state),
+    do: Map.get(first_keepalive_frames_by_identity(state), identity, 0) > 0
+
+  defp first_keepalive_current?(_identity, _state), do: false
+
+  # A successful text write can be read by the client before its close takes
+  # the port and the write watch inspects the queue. Preserve that evidence:
+  # a Ping on this already closed port would only manufacture a write failure.
+  defp outbound_ping_allowed?,
+    do: is_nil(WebsocketDownstreamWriteWatch.failure()) and not WebsocketDownstreamWriteWatch.closed_before_latest_write_read?()
 
   defp initialize_socket(state) do
     started_at = System.monotonic_time(:millisecond)
@@ -159,7 +199,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
     :ok = confirm_written_delivery_evidence(state)
 
     case WebsocketControlPath.run(:serve, fn -> handle_socket_frame(frame, state) end) do
-      {:ok, result} -> mark_stopped(result)
+      {:ok, result} -> result |> schedule_first_downstream_progress(state) |> mark_stopped()
       {:error, _reason} -> mark_stopped({:stop, :normal, {1011, "websocket control unavailable"}, state})
     end
   end
@@ -344,7 +384,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
     :ok = confirm_written_delivery_evidence(state)
 
     case WebsocketControlPath.run(:serve, fn -> handle_socket_info(message, state) end) do
-      {:ok, result} -> mark_stopped(result)
+      {:ok, result} -> result |> schedule_first_downstream_progress(state) |> mark_stopped()
       {:error, _reason} -> mark_stopped({:stop, :normal, {1011, "websocket control unavailable"}, state})
     end
   end
@@ -366,17 +406,26 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   # row 303-4).
   defp handle_socket_info(:confirm_content_filter_terminal_write, state), do: {:ok, state}
 
+  defp handle_socket_info({__MODULE__, :first_downstream_keepalive, identity}, state) do
+    if outbound_ping_allowed?() and first_keepalive_current?(identity, state) do
+      {:push, {:ping, ""}, state}
+    else
+      {:ok, state}
+    end
+  end
+
   defp handle_socket_info({__MODULE__, :downstream_keepalive, interval_ms, previous_frames}, state) do
     delivered_frames = delivered_frames_by_task(state)
     :ok = schedule_downstream_keepalive(interval_ms, delivered_frames)
 
-    case progressed_tasks(delivered_frames, previous_frames) do
-      [] ->
-        {:ok, state}
+    if owner_forwarded_socket?(state) do
+      Enum.each(progressed_tasks(delivered_frames, previous_frames), &DownstreamProgress.notify/1)
+    end
 
-      tasks ->
-        if owner_forwarded_socket?(state), do: Enum.each(tasks, &DownstreamProgress.notify/1)
-        {:push, {:ping, ""}, state}
+    if outbound_ping_allowed?() and Enum.any?(delivered_frames, fn {task, frames} -> frames > max(Map.get(previous_frames, task, 0), 1) end) do
+      {:push, {:ping, ""}, state}
+    else
+      {:ok, state}
     end
   end
 

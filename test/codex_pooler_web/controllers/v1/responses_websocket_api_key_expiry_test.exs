@@ -23,6 +23,7 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketApiKeyExpiryTest do
 
   import CodexPoolerWeb.Runtime.BackendCodexTestSupport,
     only: [
+      answer_server_pings!: 4,
       await_public_websocket_upgrade: 2,
       gateway_setup: 1,
       mint_websocket_new!: 4,
@@ -197,6 +198,7 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketApiKeyExpiryTest do
                   acc
               end)
 
+            {conn, websocket, new} = answer_server_pings!(conn, websocket, ref, new)
             frames = frames ++ new
 
             if Enum.any?(new, &match?({:close, _, _}, &1)),

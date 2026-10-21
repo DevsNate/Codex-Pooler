@@ -497,7 +497,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketFirewallRevocationTest do
             await_public_websocket_transport_barrier!(conn, websocket, ref, deadline)
 
           {:ok, conn, responses} ->
-            {websocket, pong?} = decode_transport_barrier_responses!(websocket, ref, responses)
+            {conn, websocket, pong?} = decode_transport_barrier_responses!(conn, websocket, ref, responses)
 
             if pong? do
               {conn, websocket}
@@ -510,10 +510,11 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketFirewallRevocationTest do
     end
   end
 
-  defp decode_transport_barrier_responses!(websocket, ref, responses) do
-    Enum.reduce(responses, {websocket, false}, fn
-      {:data, ^ref, response_data}, {websocket, pong?} ->
+  defp decode_transport_barrier_responses!(conn, websocket, ref, responses) do
+    Enum.reduce(responses, {conn, websocket, false}, fn
+      {:data, ^ref, response_data}, {conn, websocket, pong?} ->
         assert {:ok, websocket, frames} = Mint.WebSocket.decode(websocket, response_data)
+        {conn, websocket, frames} = answer_server_pings!(conn, websocket, ref, frames)
 
         unexpected_frames =
           Enum.reject(frames, fn
@@ -523,7 +524,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketFirewallRevocationTest do
 
         assert unexpected_frames == []
 
-        {websocket, pong? or {:pong, @websocket_transport_barrier_payload} in frames}
+        {conn, websocket, pong? or {:pong, @websocket_transport_barrier_payload} in frames}
 
       _response, state ->
         state
@@ -647,13 +648,14 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketFirewallRevocationTest do
       message ->
         case Mint.WebSocket.stream(conn, message) do
           {:ok, conn, responses} ->
-            {websocket, frames, closed?} =
-              Enum.reduce(responses, {websocket, frames, false}, fn
-                {:data, ^ref, data}, {websocket, frames, closed?} ->
+            {conn, websocket, frames, closed?} =
+              Enum.reduce(responses, {conn, websocket, frames, false}, fn
+                {:data, ^ref, data}, {conn, websocket, frames, closed?} ->
                   {:ok, websocket, decoded} = Mint.WebSocket.decode(websocket, data)
+                  {conn, websocket, decoded} = answer_server_pings!(conn, websocket, ref, decoded)
                   decoded = Enum.reject(decoded, &metadata_control_frame?/1)
 
-                  {websocket, frames ++ decoded, closed? or Enum.any?(decoded, &match?({:close, _, _}, &1))}
+                  {conn, websocket, frames ++ decoded, closed? or Enum.any?(decoded, &match?({:close, _, _}, &1))}
 
                 _response, acc ->
                   acc

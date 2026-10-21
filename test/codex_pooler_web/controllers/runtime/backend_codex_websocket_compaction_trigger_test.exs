@@ -48,6 +48,20 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketCompactionTriggerTest do
     end
   end
 
+  test "callback pumps acknowledge first-progress pings before returning the next JSON frame" do
+    first = ~s({"type":"response.output_text.delta","delta":"first fixture"})
+    second = ~s({"type":"response.output_text.delta","delta":"second fixture"})
+
+    for pump <- [&receive_queued_lite_message/1, &receive_socket_message/1] do
+      state = %{opts: RequestOptions.for_websocket(%{}), tasks: MapSet.new([self()]), task_monitors: %{}, native_turn_output_task_pids: MapSet.new()}
+      assert {:push, {:text, ^first}, state} = CodexResponsesSocket.handle_info({:codex_response_chunk, self(), first}, state)
+      send(self(), {:codex_response_chunk, self(), second})
+      assert {:push, {:text, ^second}, next} = pump.(state)
+      assert next.downstream_pong_observed?
+      assert next.downstream_delivery_evidence[self()].frames == 2
+    end
+  end
+
   defp queued_lite_compaction_case(topology, flip?) do
     previous = Application.fetch_env(:codex_pooler, :websocket_owner_forwarding_enabled)
 
@@ -252,6 +266,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketCompactionTriggerTest do
             if StreamProtocol.internal_control_event?(frame),
               do: receive_queued_lite_message(next),
               else: result
+
+          {:push, {:ping, payload}, next} ->
+            assert {:ok, next} = CodexResponsesSocket.handle_control({payload, [opcode: :pong]}, next)
+            receive_queued_lite_message(next)
 
           {:ok, next} ->
             receive_queued_lite_message(next)
@@ -3065,6 +3083,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketCompactionTriggerTest do
               result
             end
 
+          {:push, {:ping, payload}, next_state} ->
+            assert {:ok, next_state} = CodexResponsesSocket.handle_control({payload, [opcode: :pong]}, next_state)
+            receive_socket_message(next_state)
+
           {:ok, next_state} ->
             receive_socket_message(next_state)
         end
@@ -3083,6 +3105,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketCompactionTriggerTest do
             else
               receive_socket_completion(next_state)
             end
+
+          {:push, {:ping, payload}, next_state} ->
+            assert {:ok, next_state} = CodexResponsesSocket.handle_control({payload, [opcode: :pong]}, next_state)
+            receive_socket_completion(next_state)
 
           {:push, _frame, next_state} ->
             receive_socket_completion(next_state)

@@ -1363,6 +1363,40 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexTestSupport do
     {conn, websocket}
   end
 
+  @doc "Answers actual server Pings and preserves every other decoded frame in order."
+  @spec answer_server_pings!(Mint.HTTP.t(), Mint.WebSocket.t(), reference(), list()) :: {Mint.HTTP.t(), Mint.WebSocket.t(), list()}
+  def answer_server_pings!(conn, websocket, ref, frames) do
+    {conn, websocket, kept, _closed?} =
+      Enum.reduce(frames, {conn, websocket, [], false}, fn
+        {:ping, payload}, {_conn, _websocket, _kept, true} when is_binary(payload) ->
+          flunk("server Ping followed its Close frame")
+
+        {:ping, payload}, {conn, websocket, kept, false} when is_binary(payload) ->
+          assert {:ok, websocket, data} = Mint.WebSocket.encode(websocket, {:pong, payload})
+          assert {:ok, conn} = Mint.WebSocket.stream_request_body(conn, ref, data)
+          {conn, websocket, kept, false}
+
+        frame, {conn, websocket, kept, closed?} ->
+          {conn, websocket, [frame | kept], closed? or match?({:close, _, _}, frame)}
+      end)
+
+    {conn, websocket, Enum.reverse(kept)}
+  end
+
+  defp decode_control_aware_responses!(conn, websocket, ref, responses) do
+    {websocket, frames} =
+      Enum.reduce(responses, {websocket, []}, fn
+        {:data, ^ref, data}, {websocket, frames} ->
+          assert {:ok, websocket, decoded} = Mint.WebSocket.decode(websocket, data)
+          {websocket, Enum.reverse(decoded, frames)}
+
+        _response, acc ->
+          acc
+      end)
+
+    answer_server_pings!(conn, websocket, ref, Enum.reverse(frames))
+  end
+
   def public_websocket_send_fragmented_text!(conn, websocket, ref, first_fragment, final_fragment) do
     first_data = client_websocket_frame(false, :text, first_fragment)
     {:ok, conn} = Mint.WebSocket.stream_request_body(conn, ref, first_data)
@@ -1381,11 +1415,13 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexTestSupport do
 
     case Mint.WebSocket.stream(conn, message) do
       {:ok, conn, responses} ->
-        case decode_public_websocket_close(websocket, ref, responses) do
-          {:ok, websocket, code, reason} ->
+        {conn, websocket, frames} = decode_control_aware_responses!(conn, websocket, ref, responses)
+
+        case Enum.find(frames, &match?({:close, _, _}, &1)) do
+          {:close, code, reason} ->
             {conn, websocket, code, reason}
 
-          {:cont, websocket} ->
+          nil ->
             public_websocket_receive_close!(conn, websocket, ref, timeout_ms)
         end
 
@@ -1421,11 +1457,11 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexTestSupport do
 
     case Mint.WebSocket.stream(conn, message) do
       {:ok, conn, responses} ->
-        case decode_public_websocket_text(websocket, ref, responses) do
-          {:ok, websocket, text} ->
+        case decode_public_websocket_text_with_control!(conn, websocket, ref, responses) do
+          {:ok, conn, websocket, text} ->
             continue_public_websocket_receive(conn, websocket, ref, text)
 
-          {:cont, websocket} ->
+          {:cont, conn, websocket} ->
             public_websocket_receive_text!(conn, websocket, ref)
         end
 
@@ -1435,6 +1471,22 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexTestSupport do
 
       :unknown ->
         public_websocket_receive_text!(conn, websocket, ref)
+    end
+  end
+
+  @doc "Decodes the whole Mint batch, answers Pings and queues additional text frames."
+  @spec decode_public_websocket_text_with_control!(Mint.HTTP.t(), Mint.WebSocket.t(), reference(), list()) :: {:ok, Mint.HTTP.t(), Mint.WebSocket.t(), binary()} | {:cont, Mint.HTTP.t(), Mint.WebSocket.t()}
+  def decode_public_websocket_text_with_control!(conn, websocket, ref, responses) do
+    {conn, websocket, frames} = decode_control_aware_responses!(conn, websocket, ref, responses)
+
+    case decoded_public_websocket_text(websocket, frames) do
+      {:ok, websocket, [text | queued_texts]} ->
+        enqueue_public_websocket_texts(ref, queued_texts)
+        {:ok, conn, websocket, text}
+
+      {:cont, websocket} ->
+        if {:done, ref} in responses, do: flunk("websocket closed before a response frame")
+        {:cont, conn, websocket}
     end
   end
 
