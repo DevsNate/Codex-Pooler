@@ -14,6 +14,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
   alias CodexPooler.Accounting.{Attempt, Request}
   alias CodexPooler.Accounts
   alias CodexPooler.Accounts.Scope
+  alias CodexPooler.Admin.Stats
   alias CodexPooler.Audit.AuditEvent
   alias CodexPooler.Catalog
   alias CodexPooler.Catalog.Model, as: CatalogModel
@@ -29,6 +30,8 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
   alias CodexPooler.Upstreams.Quota.Windows, as: QuotaWindows
   alias CodexPooler.Upstreams.Schemas.PoolUpstreamAssignment
   alias CodexPoolerWeb.Admin.PoolForm
+  alias CodexPoolerWeb.Admin.PoolListComponents
+  alias CodexPoolerWeb.Admin.PoolsReadModel
   alias CodexPoolerWeb.Admin.UpstreamAccountsReadModel
   alias Ecto.Adapters.SQL.Sandbox
 
@@ -1250,6 +1253,46 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
     refute has_element?(view, "#pool-row-#{pool.id}", "reporting")
     refute has_element?(view, "#pool-row-#{pool.id}", "remaining")
     refute has_element?(view, "#pool-row-#{pool.id} [phx-hook='QuotaPressureChart']")
+  end
+
+  @tag :pool_partial_hour
+  test "renders the first partial hour in pool chart header totals and chart series", %{scope: scope} do
+    {:ok, pool} = Pools.create_pool(scope, %{slug: "partial-hour-chart", name: "Partial Hour Chart"})
+    %{api_key: api_key} = api_key_fixture(pool)
+    %{assignment: assignment} = upstream_assignment_fixture(pool)
+    as_of = ~U[2026-01-10 16:10:00.000000Z]
+
+    insert_timed_usage!(pool, api_key, assignment, ~U[2026-01-10 15:20:00.000000Z], 30, 30, 100)
+    insert_timed_usage!(pool, api_key, assignment, ~U[2026-01-10 16:05:00.000000Z], 70, 70, 100)
+
+    filters = PoolForm.filter(%{"traffic_window" => "1h"})
+    state = PoolsReadModel.load_structural(scope, filters)
+    usage = Stats.pool_usage_by_pool_ids([pool.id], as_of: as_of, traffic_window: "1h", histogram_pool_ids: [pool.id])
+    {rows, metrics} = PoolsReadModel.merge_traffic(state.pools, state.pool_metrics, usage, [pool.id])
+
+    html =
+      render_component(&PoolListComponents.pool_inventory/1,
+        pools: rows,
+        pool_filter_form: PoolForm.filter_form(filters),
+        delete_form: Phoenix.Component.to_form(%{}, as: "pool"),
+        delete_form_version: 0,
+        can_manage_pools?: state.can_manage_pools?,
+        can_operate_pools?: state.can_operate_pools?
+      )
+
+    document = LazyHTML.from_document(html)
+    total_selector = "#pool-row-#{pool.id}-traffic-histogram-total"
+    plot_selector = "#pool-row-#{pool.id}-traffic-histogram-plot"
+    totals = document |> LazyHTML.query(total_selector <> " .pool-token-histogram-value") |> Enum.map(&(LazyHTML.text(&1) |> String.trim()))
+    [series_json] = document |> LazyHTML.query(plot_selector) |> LazyHTML.attribute("data-chart-series")
+    series = CodexPooler.JSON.decode!(series_json)
+
+    assert metrics.request_count == 2
+    assert totals == ["100", "2"]
+    assert document |> LazyHTML.query("#pool-row-#{pool.id}-request-count") |> LazyHTML.text() |> String.trim() == "2"
+    assert Enum.find(series, &(&1["name"] == "Tokens"))["data"] == [30, 70]
+    assert Enum.find(series, &(&1["name"] == "Requests"))["data"] == [1, 1]
+    assert document |> LazyHTML.query(plot_selector) |> LazyHTML.attribute("aria-label") == ["Traffic in the last 1h: 100 tokens and 2 requests"]
   end
 
   test "renders default-window pool usage KPIs from settled usage", %{

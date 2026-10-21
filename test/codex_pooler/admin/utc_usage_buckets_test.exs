@@ -67,10 +67,10 @@ defmodule CodexPooler.Admin.UTCUsageBucketsTest do
       assert result.source == expected_source
       assert summary.total_tokens == 360
       assert summary.request_count == 8
-      # Pool hourly cards keep24 labels; Stats includes the partial leading hour.
-      histogram_seed = if window == "24h", do: %{seed | entries: tl(seed.entries)}, else: seed
-      assert nonzero(histogram.token_histogram, :bucket, :total_tokens) == expected(histogram_seed, window, :tokens)
-      assert nonzero(histogram.request_histogram, :bucket, :requests) == expected(histogram_seed, window, :requests)
+      assert nonzero(histogram.token_histogram, :bucket, :total_tokens) == expected(seed, window, :tokens)
+      assert nonzero(histogram.request_histogram, :bucket, :requests) == expected(seed, window, :requests)
+      assert Enum.sum_by(histogram.token_histogram, & &1.total_tokens) == summary.total_tokens
+      assert Enum.sum_by(histogram.request_histogram, & &1.requests) == summary.request_count
       result
     end
   end

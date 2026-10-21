@@ -396,7 +396,14 @@ defmodule CodexPooler.Admin.Stats.PoolUsage do
         ended_at
       )
 
-    token_histograms = pool_token_histograms(pool_ids, settlement_usage_buckets, ended_at, window)
+    labels =
+      if window == :seven_days do
+        Buckets.labels(%{window: window, ended_at: ended_at})
+      else
+        Buckets.stats_labels(%{window: window, started_at: started_at, ended_at: ended_at})
+      end
+
+    token_histograms = pool_token_histograms(pool_ids, settlement_usage_buckets, labels, window)
 
     request_histograms =
       pool_request_histograms(
@@ -407,7 +414,7 @@ defmodule CodexPooler.Admin.Stats.PoolUsage do
           ended_at,
           pool_bucket_granularity(window)
         ),
-        ended_at,
+        labels,
         window
       )
 
@@ -449,9 +456,7 @@ defmodule CodexPooler.Admin.Stats.PoolUsage do
   defp pool_bucket_granularity(:seven_days), do: :day
   defp pool_bucket_granularity(_window), do: :hour
 
-  defp pool_token_histograms(pool_ids, settlements, ended_at, window) do
-    labels = Buckets.labels(%{window: window, ended_at: ended_at})
-
+  defp pool_token_histograms(pool_ids, settlements, labels, window) do
     entries_by_pool_bucket =
       Enum.group_by(settlements, fn settlement ->
         {settlement.pool_id, Buckets.label(settlement.bucket, window)}
@@ -472,9 +477,7 @@ defmodule CodexPooler.Admin.Stats.PoolUsage do
     end)
   end
 
-  defp pool_request_histograms(pool_ids, request_counts, ended_at, window) do
-    labels = Buckets.labels(%{window: window, ended_at: ended_at})
-
+  defp pool_request_histograms(pool_ids, request_counts, labels, window) do
     requests_by_pool_bucket =
       Map.new(request_counts, fn row ->
         {{row.pool_id, Buckets.label(row.bucket, window)}, row.requests}
