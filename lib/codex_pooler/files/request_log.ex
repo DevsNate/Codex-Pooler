@@ -76,10 +76,24 @@ defmodule CodexPooler.Files.RequestLog do
           "upload_bytes" => request_metadata.upload_bytes,
           "request_content_type" => request_metadata.request_content_type
         }),
-      "routing" => drop_nil_values(%{"route_class" => request_metadata.route_class})
+      "routing" => routing_metadata(metadata, request_metadata.route_class)
     })
     |> maybe_put_client_request_id(request_metadata)
     |> drop_empty_maps()
+  end
+
+  defp routing_metadata(metadata, route_class) do
+    routing =
+      case Map.get(metadata, "routing") do
+        value when is_map(value) -> value
+        _invalid -> %{}
+      end
+
+    %{"routing" => routing}
+    |> Accounting.sanitize_metadata()
+    |> Map.fetch!("routing")
+    |> Map.delete(:route_class)
+    |> Map.merge(drop_nil_values(%{"route_class" => route_class}))
   end
 
   defp maybe_put_client_request_id(metadata, %RequestMetadata{client_request_id: value})
