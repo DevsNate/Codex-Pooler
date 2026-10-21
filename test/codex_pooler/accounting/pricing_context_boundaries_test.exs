@@ -44,7 +44,7 @@ defmodule CodexPooler.Accounting.PricingContextBoundariesTest do
     import_catalog!("2026-10-11T00:00:00Z", %{"gpt-example-a" => latest})
     pricing = lookup("gpt-example-a", 500_001)
     assert pricing.price_bucket == "default"
-    assert pricing.snapshot.price_version == "2026-10-11T00:00:00Z:importer-format-3"
+    assert pricing.snapshot.price_version == "2026-10-11T00:00:00Z:importer-format-4"
     assert pricing.price_bucket_fallback["requested"] == "long_context"
   end
 
@@ -102,14 +102,14 @@ defmodule CodexPooler.Accounting.PricingContextBoundariesTest do
       import_catalog!("2026-10-11T00:00:00Z", %{identifier => newer, "gpt-example-lower-#{state}" => model_prices(272_000, 272_000)})
 
       if state == "invalid" do
-        Repo.update_all(from(p in PricingSnapshot, where: p.model_identifier == ^identifier and p.price_version == "2026-10-11T00:00:00Z:importer-format-3", update: [set: [config: fragment("jsonb_set(?, '{context_pricing}', 'null'::jsonb)", p.config)]]), [])
+        Repo.update_all(from(p in PricingSnapshot, where: p.model_identifier == ^identifier and p.price_version == "2026-10-11T00:00:00Z:importer-format-4", update: [set: [config: fragment("jsonb_set(?, '{context_pricing}', 'null'::jsonb)", p.config)]]), [])
       end
 
       pricing = lookup(identifier, 400_000, "standard", "gpt-example-lower-#{state}")
       assert pricing.status == "unpriced_context_boundary_#{state}"
       assert pricing.snapshot == nil
       assert pricing.context_pricing["status"] == state
-      assert pricing.context_pricing["generation"]["price_version"] == "2026-10-11T00:00:00Z:importer-format-3"
+      assert pricing.context_pricing["generation"]["price_version"] == "2026-10-11T00:00:00Z:importer-format-4"
     end
   end
 
@@ -150,7 +150,7 @@ defmodule CodexPooler.Accounting.PricingContextBoundariesTest do
     import_catalog!("2026-10-13T00:00:00Z", %{"gpt-example-future" => model_prices(272_000, 272_000)})
     pricing = lookup("gpt-example-future", 400_000)
     assert pricing.price_bucket == "default"
-    assert pricing.snapshot.price_version == "2026-10-11T00:00:00Z:importer-format-3"
+    assert pricing.snapshot.price_version == "2026-10-11T00:00:00Z:importer-format-4"
 
     snapshot!("gpt-example-unavailable", "default", "same-generation", coherent: true)
     snapshot!("gpt-example-unavailable", "long_context", "same-generation", coherent: true, unavailable: true)
@@ -175,7 +175,7 @@ defmodule CodexPooler.Accounting.PricingContextBoundariesTest do
     import_catalog!("2026-10-11T00:00:00Z", %{identifier => newer})
     pricing = PricingResolution.lookup_for_settlement(request, %Attempt{}, %LedgerEntry{details: %{}}, usage, %{}, @as_of)
     assert pricing.status == "unpriced_missing_cache_write_rate"
-    assert pricing.snapshot.price_version == "2026-10-11T00:00:00Z:importer-format-3"
+    assert pricing.snapshot.price_version == "2026-10-11T00:00:00Z:importer-format-4"
     assert pricing.snapshot.cache_write_token_micros == nil
 
     for writes <- [0, nil] do

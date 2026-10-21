@@ -5,7 +5,7 @@ defmodule CodexPooler.Accounting.PricingResolution.ContextRule do
 
   @spec classify(map(), non_neg_integer() | {:bucket, String.t()}) :: map()
   def classify(%{anchor: anchor, buckets: buckets}, input) do
-    coherent? = anchor.config["importer_format_revision"] in [3, "3"] or Map.has_key?(anchor.config, "context_pricing")
+    coherent? = anchor.config["importer_format_revision"] in [3, "3", 4, "4"] or Map.has_key?(anchor.config, "context_pricing")
     rule = if coherent?, do: validated_rule(anchor, buckets), else: ContextPricing.legacy()
     {bucket, band} = bucket(rule, buckets, input, coherent?)
 

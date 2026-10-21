@@ -23,10 +23,10 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporterTest do
     end
   end
 
-  test "revision 3 records immutable v2 rules and ignores timestamp layout and rule provenance" do
+  test "revision 4 records immutable v2 rules and ignores timestamp layout and rule provenance" do
     payload = v2_payload("gpt-example-a")
     assert {:ok, %{inserted: 1, price_version: version}} = OpenAIPricingImporter.import_file(write_json!(payload))
-    assert version == payload["generated_at"] <> ":importer-format-3"
+    assert version == payload["generated_at"] <> ":importer-format-4"
     original = Repo.one!(from row in PricingSnapshot, where: row.model_identifier == "gpt-example-a")
     assert original.config["catalog_schema_version"] == 2
     assert original.config["context_pricing"]["long_context_input_tokens_gt"] == 500_000
@@ -108,7 +108,7 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporterTest do
     assert Enum.uniq(Enum.map(original, & &1.config["context_pricing"])) |> length() == 1
     assert Enum.map(original, & &1.config["price_bucket"]) |> Enum.sort() == ~w(default long_context short_context)
     next = payload |> Map.put("generated_at", "2026-07-29T00:00:00+00:00") |> update_in(model_path, &Map.delete(&1, "timestamp"))
-    assert {:ok, %{inserted: 3, price_version: "2026-07-29T00:00:00+00:00:importer-format-3"}} = OpenAIPricingImporter.import_file(write_json!(next))
+    assert {:ok, %{inserted: 3, price_version: "2026-07-29T00:00:00+00:00:importer-format-4"}} = OpenAIPricingImporter.import_file(write_json!(next))
     assert Enum.map(original, &persisted_snapshot_fields(Repo.get!(PricingSnapshot, &1.id))) == Enum.map(original, &persisted_snapshot_fields/1)
   end
 
@@ -365,9 +365,9 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporterTest do
     assert Repo.aggregate(PricingSnapshot, :count) == before_count
   end
 
-  test "imports revision 3 rows from the immutable fixture idempotently" do
+  test "imports revision 4 rows from the immutable fixture idempotently" do
     assert {:ok, first} = OpenAIPricingImporter.import_file(@fixture)
-    assert first.price_version == "2026-07-28T17:25:03.915713Z:importer-format-3"
+    assert first.price_version == "2026-07-28T17:25:03.915713Z:importer-format-4"
     assert first.inserted == 208
     assert first.skipped == 90
 
@@ -379,7 +379,7 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporterTest do
       Repo.all(from snapshot in PricingSnapshot, where: snapshot.price_version == ^first.price_version)
 
     assert length(rows) == 208
-    assert Enum.all?(rows, &(&1.config["importer_format_revision"] == "3"))
+    assert Enum.all?(rows, &(&1.config["importer_format_revision"] == "4"))
     assert Enum.all?(rows, &(&1.config["catalog_schema_version"] == 1 and &1.config["context_pricing"] == %{"version" => 1, "status" => "legacy", "long_context_input_tokens_gt" => 272_000}))
     refute Enum.any?(rows, &(&1.config["service_tier"] == "fast"))
   end
@@ -700,7 +700,7 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporterTest do
     refute Repo.exists?(from row in PricingSnapshot, where: row.model_identifier == "sample-model")
   end
 
-  test "revision 3 canonical import preserves revision 1 fast rows and attempt references" do
+  test "revision 4 canonical import preserves revision 1 fast rows and attempt references" do
     generated_at = "2026-07-30T10:00:00Z"
     legacy = seed_snapshot!("revision-model", generated_at, "fast", "1", 2)
 
@@ -724,7 +724,7 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporterTest do
     assert {:ok, %{inserted: 1, price_version: version}} =
              OpenAIPricingImporter.import_file(write_json!(payload))
 
-    assert version == "#{generated_at}:importer-format-3"
+    assert version == "#{generated_at}:importer-format-4"
     assert Repo.get!(PricingSnapshot, legacy.id).config["service_tier"] == "fast"
     assert Repo.get!(CodexPooler.Accounting.Attempt, attempt.id).pricing_snapshot_id == legacy.id
 

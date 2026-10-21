@@ -610,7 +610,7 @@ defmodule CodexPooler.Catalog.OpenAIPricingFormat do
       categories: Enum.map(model["categories"], &String.trim/1),
       availability: availability,
       input: decimal(values["input"]),
-      cached_input: decimal(values["cached_input"]) || if(availability == "priced", do: Decimal.new(0)),
+      cached_input: decimal(values["cached_input"]),
       cache_write: decimal(values["cache_write"]),
       output: output,
       reasoning: reasoning,

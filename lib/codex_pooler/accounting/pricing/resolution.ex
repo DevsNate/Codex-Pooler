@@ -81,6 +81,7 @@ defmodule CodexPooler.Accounting.PricingResolution do
         details_value(reservation, "batch_usage") == true
       )
       |> require_cache_write_rate(usage)
+      |> require_cached_input_rate(usage)
     else
       unpriced_snapshot("unpriced_missing_model", nil, nil, nil, false)
     end
@@ -543,6 +544,16 @@ defmodule CodexPooler.Accounting.PricingResolution do
   end
 
   defp require_cache_write_rate(pricing, _usage), do: pricing
+
+  defp require_cached_input_rate(
+         %{status: "priced", snapshot: %PricingSnapshot{cached_input_token_micros: nil}} = pricing,
+         %{input_tokens: input_tokens, cached_input_tokens: cached_input_tokens}
+       )
+       when is_integer(input_tokens) and input_tokens > 0 and is_integer(cached_input_tokens) and cached_input_tokens > 0 do
+    %{pricing | status: "unpriced_missing_cached_input_rate"}
+  end
+
+  defp require_cached_input_rate(pricing, _usage), do: pricing
 
   @spec unavailable_pricing_snapshot_marker?(PricingSnapshot.t()) :: boolean()
   defp unavailable_pricing_snapshot_marker?(%PricingSnapshot{config: config}) do

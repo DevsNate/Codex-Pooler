@@ -26,7 +26,7 @@ defmodule CodexPooler.Accounting.PricingResolution.Generations do
     FROM eligible e JOIN anchors a ON e.identifier = a.identifier
     WHERE e.config->>'service_tier' = ANY($3::text[])
       AND e.config->>'price_bucket' IN ('default', 'short_context', 'long_context')
-      AND (NOT (COALESCE(a.config->>'importer_format_revision', '') = '3' OR a.config ? 'context_pricing')
+      AND (NOT (COALESCE(a.config->>'importer_format_revision', '') IN ('3', '4') OR a.config ? 'context_pricing')
         OR (e.price_version = a.price_version
           AND COALESCE(e.config->>'importer_format_revision', '') = COALESCE(a.config->>'importer_format_revision', '')))
     ORDER BY e.identifier, e.config->>'price_bucket', e.effective_at DESC, e.captured_at DESC,

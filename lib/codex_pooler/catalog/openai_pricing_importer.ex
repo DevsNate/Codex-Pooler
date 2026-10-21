@@ -8,7 +8,7 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporter do
   alias CodexPooler.Repo
 
   @source "openai-json-pricing"
-  @revision "3"
+  @revision "4"
   @currency_code "USD"
   @billing_unit "token"
 

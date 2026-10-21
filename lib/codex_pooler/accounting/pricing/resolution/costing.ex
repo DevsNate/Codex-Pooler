@@ -47,7 +47,15 @@ defmodule CodexPooler.Accounting.PricingResolution.Costing do
   @spec cost_micros(struct() | nil, map()) :: Decimal.t() | nil
   def cost_micros(nil, _usage), do: nil
 
-  def cost_micros(%PricingSnapshot{} = snapshot, usage) do
+  def cost_micros(%PricingSnapshot{cached_input_token_micros: nil} = snapshot, usage) do
+    if min(usage_value(usage, :cached_input_tokens), usage_value(usage, :input_tokens)) > 0,
+      do: nil,
+      else: priced_cost_micros(snapshot, usage)
+  end
+
+  def cost_micros(%PricingSnapshot{} = snapshot, usage), do: priced_cost_micros(snapshot, usage)
+
+  defp priced_cost_micros(snapshot, usage) do
     input_tokens = usage_value(usage, :input_tokens)
     cached_input_tokens = usage_value(usage, :cached_input_tokens)
     cache_write_tokens = reported_usage_value(usage, :cache_write_tokens)
