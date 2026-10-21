@@ -225,6 +225,36 @@ defmodule CodexPooler.InstanceSettingsTest do
     assert Repo.aggregate(Settings, :count) == 1
   end
 
+  test "legacy file cleanup interval loads and active file settings still persist" do
+    InstanceSettings.ensure_singleton!()
+
+    for interval <- [60, 86_400] do
+      assert %{num_rows: 1} =
+               Repo.query!(
+                 "UPDATE instance_settings SET files = jsonb_set(files, '{abandoned_upload_cleanup_interval_seconds}', $1::jsonb)",
+                 [interval]
+               )
+
+      loaded = InstanceSettings.get!()
+      original_size = loaded.files.max_size_bytes
+
+      refute Map.has_key?(loaded.files, :abandoned_upload_cleanup_interval_seconds)
+      refute Map.has_key?(OperationalSettings.from_instance_settings(loaded), :abandoned_upload_cleanup_interval_seconds)
+
+      assert {:ok, updated} =
+               InstanceSettings.update_system_settings(loaded, %{
+                 "files" => %{"upload_ttl_seconds" => interval + 1}
+               })
+
+      reloaded = InstanceSettings.get!()
+      assert reloaded.lock_version == updated.lock_version
+      assert reloaded.lock_version == loaded.lock_version + 1
+      assert reloaded.files.upload_ttl_seconds == interval + 1
+      assert reloaded.files.max_size_bytes == original_size
+      assert %{rows: [[false]]} = Repo.query!("SELECT files ? 'abandoned_upload_cleanup_interval_seconds' FROM instance_settings")
+    end
+  end
+
   test "baseline characterization preserves downstream websocket idle timeout and persistence round-trip" do
     settings = InstanceSettings.ensure_singleton!()
 

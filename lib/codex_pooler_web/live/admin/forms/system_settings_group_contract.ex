@@ -18,7 +18,7 @@ defmodule CodexPoolerWeb.Admin.SystemSettingsGroupContract do
     "token_refresh" => {"gateway", ~w(upstream_token_refresh_margin_seconds upstream_token_refresh_proactive_enabled)},
     "continuity" => {"gateway", ~w(expired_alias_ttl_seconds bridge_owner_lease_ttl_seconds bridge_owner_lease_renewal_seconds)},
     "circuit" => {"gateway", ~w(circuit_failure_threshold circuit_open_seconds circuit_half_open_probe_limit circuit_success_threshold)},
-    "files" => {"files", ~w(max_size_bytes upload_ttl_seconds abandoned_upload_cleanup_interval_seconds)},
+    "files" => {"files", ~w(max_size_bytes upload_ttl_seconds)},
     "transcription" => {"transcription", ~w(max_upload_bytes)}
   }
 

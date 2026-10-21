@@ -328,10 +328,7 @@ defmodule CodexPoolerWeb.Admin.SystemSettingsFormTest do
     assert get_in(restored_files, ["files", "max_size_bytes"]) == 26_214_400
     assert get_in(restored_files, ["files", "upload_ttl_seconds"]) == 86_400
 
-    assert get_in(restored_files, [
-             "files",
-             "abandoned_upload_cleanup_interval_seconds"
-           ]) == 900
+    refute Map.has_key?(restored_files["files"], "abandoned_upload_cleanup_interval_seconds")
 
     assert get_in(restored_files, ["transcription", "max_upload_bytes"]) == 456
 

@@ -2150,6 +2150,29 @@ defmodule CodexPoolerWeb.Admin.SystemLiveTest do
     refute has_element?(view, "#instance-settings-openai-status-polling-enabled[checked]")
   end
 
+  test "file controls omit the retired cleanup interval and persist active limits", %{conn: conn} do
+    InstanceSettings.ensure_singleton!()
+    Repo.query!("UPDATE instance_settings SET files = jsonb_set(files, '{abandoned_upload_cleanup_interval_seconds}', '60'::jsonb)")
+
+    {:ok, view, _html} = live(conn, ~p"/admin/system?#{%{"tab" => "gateway"}}")
+    refute has_element?(view, "#instance-settings-abandoned-upload-cleanup-interval-seconds")
+
+    view
+    |> form("#instance-settings-gateway-form", %{
+      "instance_settings" => %{"files" => %{"max_size_bytes" => "123456", "upload_ttl_seconds" => "456"}}
+    })
+    |> render_submit()
+
+    assert has_element?(view, "#instance-settings-gateway-status", "Saved")
+    assert InstanceSettings.get!().files.max_size_bytes == 123_456
+    assert InstanceSettings.get!().files.upload_ttl_seconds == 456
+
+    {:ok, reloaded, _html} = live(conn, ~p"/admin/system?#{%{"tab" => "gateway"}}")
+    assert has_element?(reloaded, "#instance-settings-file-max-size-bytes[value='123456']")
+    assert has_element?(reloaded, "#instance-settings-upload-ttl-seconds[value='456']")
+    refute has_element?(reloaded, "#instance-settings-abandoned-upload-cleanup-interval-seconds")
+  end
+
   test "saves gateway, file, and transcription limits as one card", %{conn: conn, user: user} do
     {:ok, view, _html} = live(conn, ~p"/admin/system?#{%{"tab" => "gateway"}}")
 

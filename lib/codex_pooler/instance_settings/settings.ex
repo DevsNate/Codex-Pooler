@@ -85,7 +85,6 @@ defmodule CodexPooler.InstanceSettings.Settings do
     embeds_one :files, Files, on_replace: :update, primary_key: false do
       field :max_size_bytes, :integer
       field :upload_ttl_seconds, :integer
-      field :abandoned_upload_cleanup_interval_seconds, :integer
     end
 
     embeds_one :transcription, Transcription, on_replace: :update, primary_key: false do
@@ -370,19 +369,10 @@ defmodule CodexPooler.InstanceSettings.Settings do
 
   defp files_changeset(files, attrs) do
     files
-    |> cast(attrs, [
-      :max_size_bytes,
-      :upload_ttl_seconds,
-      :abandoned_upload_cleanup_interval_seconds
-    ])
-    |> validate_required([
-      :max_size_bytes,
-      :upload_ttl_seconds,
-      :abandoned_upload_cleanup_interval_seconds
-    ])
+    |> cast(attrs, [:max_size_bytes, :upload_ttl_seconds])
+    |> validate_required([:max_size_bytes, :upload_ttl_seconds])
     |> validate_positive_integer(:max_size_bytes)
     |> validate_positive_integer(:upload_ttl_seconds)
-    |> validate_positive_integer(:abandoned_upload_cleanup_interval_seconds)
   end
 
   defp transcription_changeset(transcription, attrs) do

@@ -59,8 +59,7 @@ defmodule CodexPooler.InstanceSettings.Defaults do
 
     %{
       "max_size_bytes" => settings.file_max_size_bytes,
-      "upload_ttl_seconds" => settings.upload_ttl_seconds,
-      "abandoned_upload_cleanup_interval_seconds" => settings.abandoned_upload_cleanup_interval_seconds
+      "upload_ttl_seconds" => settings.upload_ttl_seconds
     }
   end
 

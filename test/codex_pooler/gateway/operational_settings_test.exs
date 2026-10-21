@@ -47,7 +47,7 @@ defmodule CodexPooler.Gateway.OperationalSettingsTest do
     refute OperationalSettings.settings_unavailable?(settings)
     assert settings.file_max_size_bytes == 25 * 1024 * 1024
     assert settings.upload_ttl_seconds == 24 * 60 * 60
-    assert settings.abandoned_upload_cleanup_interval_seconds == 15 * 60
+    refute Map.has_key?(settings, :abandoned_upload_cleanup_interval_seconds)
     assert settings.bridge_owner_lease_ttl_seconds == 45
     assert settings.bridge_owner_lease_renewal_seconds == 15
     assert settings.expired_alias_ttl_seconds == 24 * 60 * 60
@@ -123,8 +123,7 @@ defmodule CodexPooler.Gateway.OperationalSettingsTest do
              InstanceSettings.update_system_settings(instance_settings, %{
                "files" => %{
                  "max_size_bytes" => 1024,
-                 "upload_ttl_seconds" => 60,
-                 "abandoned_upload_cleanup_interval_seconds" => 15
+                 "upload_ttl_seconds" => 60
                },
                "ingress" => %{
                  "firewall_allowlist" => ["203.0.113.10", "203.0.113.11"],
@@ -165,7 +164,7 @@ defmodule CodexPooler.Gateway.OperationalSettingsTest do
     assert initial_snapshot.file_max_size_bytes == 25 * 1024 * 1024
     assert settings.file_max_size_bytes == 1024
     assert settings.upload_ttl_seconds == 60
-    assert settings.abandoned_upload_cleanup_interval_seconds == 15
+    refute Map.has_key?(settings, :abandoned_upload_cleanup_interval_seconds)
     assert settings.firewall_allowlist == ["203.0.113.10", "203.0.113.11"]
     assert {:ok, [_first, _second]} = settings.firewall_allowlist_compiled
     assert OperationalSettings.firewall_enabled?(settings)

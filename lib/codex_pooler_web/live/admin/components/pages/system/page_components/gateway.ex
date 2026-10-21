@@ -336,7 +336,7 @@ defmodule CodexPoolerWeb.Admin.SystemPageComponents.Gateway do
       %{
         id: "files",
         label: "File bridge",
-        description: "Controls upload size, metadata lifetime, and abandoned-upload cleanup.",
+        description: "Controls upload size and metadata lifetime. Expired uploads are checked every 15 minutes.",
         form: files_form,
         settings: [
           gateway_setting(%{
@@ -352,14 +352,6 @@ defmodule CodexPoolerWeb.Admin.SystemPageComponents.Gateway do
             field: :upload_ttl_seconds,
             label: "File metadata TTL (s)",
             hint: "How long upload metadata remains available before expiry.",
-            minimum: 1,
-            unit: "s"
-          }),
-          gateway_setting(%{
-            id: "instance-settings-abandoned-upload-cleanup-interval-seconds",
-            field: :abandoned_upload_cleanup_interval_seconds,
-            label: "Abandoned upload cleanup interval (s)",
-            hint: "How often cleanup scans run for abandoned file uploads.",
             minimum: 1,
             unit: "s"
           })
