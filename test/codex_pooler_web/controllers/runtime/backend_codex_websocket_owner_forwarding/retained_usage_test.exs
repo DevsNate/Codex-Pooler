@@ -133,6 +133,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RetainedUs
     owner_monitor = Process.monitor(owner)
 
     if ending == :receipt_failure, do: fail_receipt_completion_after_commit(owner)
+    prepare_retained_usage_hold!(ending == :kill_with_stale_ack, owner, hold)
 
     cleanup_state = %{websocket_owner_pid: owner, websocket_owner_downstream: pending.downstream, websocket_owner_lease_token: session.owner_lease_token, codex_session: session, opts: %{}}
 
@@ -150,19 +151,22 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RetainedUs
     send(cleanup.pid, :cleanup)
     caller = cleanup.pid
 
-    duplicate =
+    {duplicate, receipt_worker} =
       try do
         assert_receive {:trace, ^caller, :call, {WebsocketOwnerSession, :drain_owner, [^owner]}}, @timeout
-        await_sql_receipt_worker!(harness.activity_registry, deadline())
+        receipt_worker = await_sql_receipt_worker!(harness.activity_registry, deadline())
         assert_sql_blocker!(backend, deadline())
 
         disrupt_owner_observation(owner, ending)
 
-        if ending == :graceful do
-          duplicate = Task.async(fn -> WebsocketOwnerSession.drain_owner(owner) end)
-          await_owner_drain_waiters!(owner, 2, deadline())
-          duplicate
-        end
+        duplicate =
+          if ending == :graceful do
+            duplicate = Task.async(fn -> WebsocketOwnerSession.drain_owner(owner) end)
+            await_owner_drain_waiters!(owner, 2, deadline())
+            duplicate
+          end
+
+        {duplicate, receipt_worker}
       after
         Postgrex.query!(lock, "ROLLBACK", [])
         GenServer.stop(lock)
@@ -178,6 +182,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RetainedUs
     assert await_settlement!(request_id, deadline()).total_tokens == 120
     assert %DateTime{} = Repo.get!(CodexSession, session.id).disconnected_at
     assert Repo.get_by!(BridgeOwnerLease, codex_session_id: session.id, lease_token: session.owner_lease_token).status == "released"
+    # Durable rows precede the receipt worker's registry acknowledgement. If
+    # the only virtual tick polls while it is active, the next poll stays parked
+    # and the real watchdog reports a failed receipt that already committed.
+    await_competing_receipt_finished!(harness, receipt_worker, ending, hold)
     VirtualDeadline.advance(harness.deadline, 200)
     summary = Task.await(drain, @timeout)
     assert :sys.get_state(harness.name).deadline_ms == drain_deadline
@@ -188,6 +196,39 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RetainedUs
     snapshot = assert_competing_original!(ending, request_id, attempt_id, backend)
     record_evidence(%{scenario: "competing_local_cleanup_owner_exit", mode: mode, ending: ending, request_id: request_id, actual_drain_caller_observed: true, actual_drain_return: if(ending == :kill_with_stale_ack, do: nil, else: "ok"), private_completion: private_completion, terminal_forwarded: false, shared_deadline_ms: drain_deadline, postgres_snapshot: snapshot, owner_exit: expected_exit, sql_blocker_observed: true, original_lease_released: true, session_disconnected: true, total_tokens: 120, summary: summary})
     assert_competing_owner_outcome(summary, ending)
+  end
+
+  defp await_competing_receipt_finished!(harness, worker, ending, hold) do
+    release =
+      if ending == :kill_with_stale_ack do
+        assert_receive {:retained_usage_committed, ^worker, ^hold}, @timeout
+        on_exit(fn -> send(worker, {:release_retained_usage, hold}) end)
+
+        fn ->
+          # The real postcommit worker stays active until this readiness check
+          # observes it; advancing time before the check must fail this case.
+          assert VirtualDeadline.now_ms(harness.deadline) == 0
+          send(worker, {:release_retained_usage, hold})
+        end
+      else
+        fn -> :ok end
+      end
+
+    await_competing_receipt_terminal!(harness.activity_registry, worker, release, deadline())
+  end
+
+  defp await_competing_receipt_terminal!(registry, worker, release, limit) do
+    case ActivityRegistry.receipt_cohort(name: registry) do
+      %{closed?: true, entries: [%{pid: ^worker, status: {:finished, _outcome}}]} ->
+        :ok
+
+      %{entries: [%{pid: ^worker, status: :active}]} ->
+        release.()
+        retry!(fn -> await_competing_receipt_terminal!(registry, worker, release, limit) end, limit, "exact receipt worker did not finish before the drain poll")
+
+      _pending ->
+        retry!(fn -> await_competing_receipt_terminal!(registry, worker, release, limit) end, limit, "exact receipt cohort did not close before the drain poll")
+    end
   end
 
   defp observe_competing_completion(owner, :graceful) do
