@@ -27,6 +27,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport do
   alias CodexPooler.Gateway.Persistence.CodexSession
   alias CodexPooler.Gateway.Persistence.CodexTurn
   alias CodexPooler.Gateway.Persistence.RoutingCircuitState
+  alias CodexPooler.Gateway.Runtime.Finalization.RetainedUsage
   alias CodexPooler.Gateway.Transports.Admission
   alias CodexPooler.Gateway.Transports.ProviderCreditsAdmission
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
@@ -272,6 +273,34 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport do
     end)
 
     {session, owner_pid}
+  end
+
+  @doc false
+  @spec hold_retained_usage_after_commit!(pid(), pid(), reference()) :: :ok
+  def hold_retained_usage_after_commit!(owner, test_pid, hold_ref) do
+    :sys.replace_state(owner, fn state ->
+      finalizer = Map.get(state.persistence, :retained_usage, &RetainedUsage.finalize/1)
+
+      held = fn snapshot ->
+        result = finalizer.(snapshot)
+        monitor = Process.monitor(test_pid)
+        send(test_pid, {:retained_usage_committed, self(), hold_ref})
+
+        receive do
+          {:release_retained_usage, ^hold_ref} -> :ok
+          {:DOWN, ^monitor, :process, ^test_pid, _reason} -> :ok
+        after
+          15_000 -> raise "retained usage postcommit barrier expired"
+        end
+
+        Process.demonitor(monitor, [:flush])
+        result
+      end
+
+      %{state | persistence: Map.put(state.persistence, :retained_usage, held)}
+    end)
+
+    :ok
   end
 
   @doc false

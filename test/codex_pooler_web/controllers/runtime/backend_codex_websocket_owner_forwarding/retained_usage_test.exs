@@ -41,6 +41,11 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RetainedUs
     end
   end
 
+  @tag topology: :peer, mode: "full", interruption: :detach
+  test "independent successor waits until the committed peer receipt completes" do
+    run_scenario(:peer, "full", :detach, true)
+  end
+
   for mode <- ["full", "lite"] do
     @tag mode: mode, topology: :peer, interruption: :legacy_caller
     test "admitted legacy caller drops additive usage while peer owner commits (#{mode})", %{mode: mode} do
@@ -364,7 +369,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RetainedUs
     if count > 0, do: :ok, else: retry!(fn -> assert_sql_blocker!(backend, limit) end, limit, "no blocked SQL backend observed")
   end
 
-  defp run_scenario(topology, mode, interruption) do
+  defp run_scenario(topology, mode, interruption, hold_after_commit? \\ false) do
     if topology == :peer, do: enter_peer_owner_topology!(), else: OwnerCrashAfterSendScenario.per_process_connections!()
     assert_namespace!()
     hold = make_ref()
@@ -385,6 +390,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RetainedUs
       end
 
     assert node(owner) != node() == (topology == :peer)
+    prepare_retained_usage_hold!(hold_after_commit?, owner, hold)
     owner_identity = :erpc.call(node(owner), Identity, :local, [])
     caller_identity = Identity.local()
     assert owner_identity.instance_id != caller_identity.instance_id == (topology == :peer)
@@ -452,6 +458,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RetainedUs
         GenServer.stop(db)
       end
 
+    # A committed receipt is not owner completion: the worker still has to
+    # deliver its result and the owner must consume it before this independent,
+    # claimless successor can be admitted (it cannot use native handoff).
+    await_successor_owner!(owner, interruption, hold_after_commit?, hold)
     successor = assert_successor!(upstream, port, setup, headers, request_id, entry, attempt, turn)
     record_evidence(%{endpoint_port: port, fixture_port: URI.parse(FakeUpstream.url(upstream)).port, original_execution_identity: admitted_identity, owner_pid: inspect(owner), postgres_snapshot: snapshot, successor_request_id: successor.id, successor_tokens: 5, predecessor_unchanged_after_successor: true, topology: topology, mode: mode, interruption: interruption, request_id: request_id, attempt_id: attempt_id, replay_generation: attempt.replay_generation, settlement_id: entry.id, usage_status: entry.usage_status, total_tokens: entry.total_tokens, error_code: request.last_error_code, response_status_code: request.response_status_code, request_status: request.status, attempt_status: attempt.status, turn_status: turn.status, owner_node: Atom.to_string(node(owner)), caller_node: Atom.to_string(node()), owner_instance_id: session.owner_instance_id, owner_live_instance_id: owner_identity.instance_id, caller_live_instance_id: caller_identity.instance_id, database: Repo.config()[:database], committed_independent_connection: true, provider_generations: 2})
   end
@@ -479,12 +489,68 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RetainedUs
     {conn, websocket, text} = public_websocket_receive_text!(conn, websocket, ref)
     frame = CodexPooler.JSON.decode!(text)
 
-    if frame["type"] == "response.completed" and
-         get_in(frame, ["response", "id"]) == response_id do
-      {conn, websocket, text}
-    else
-      receive_successor_terminal!(conn, websocket, ref, response_id)
+    case frame["type"] do
+      "response.completed" ->
+        assert get_in(frame, ["response", "id"]) == response_id, "successor completed with an unexpected response id"
+        {conn, websocket, text}
+
+      terminal when terminal in ["error", "response.failed", "response.incomplete"] ->
+        flunk("unexpected successor terminal: #{terminal}")
+
+      _progress ->
+        receive_successor_terminal!(conn, websocket, ref, response_id)
     end
+  end
+
+  defp prepare_retained_usage_hold!(false, _owner, _hold), do: :ok
+  defp prepare_retained_usage_hold!(true, owner, hold), do: hold_retained_usage_after_commit!(owner, self(), hold)
+
+  defp await_successor_owner!(owner, interruption, false, _hold), do: await_successor_owner!(owner, interruption)
+
+  defp await_successor_owner!(owner, interruption, true, hold) do
+    releaser = release_receipt_after_active_observation!(owner, hold)
+    await_successor_owner!(owner, interruption)
+    finish_receipt_releaser!(releaser)
+  end
+
+  defp await_successor_owner!(_owner, interruption) when interruption in [:drain, :retirement], do: :ok
+  defp await_successor_owner!(owner, _interruption), do: await_owner_idle!(owner, deadline())
+
+  defp await_owner_idle!(owner, limit) do
+    {:ok, status} = WebsocketOwnerSession.owner_status(owner)
+    if status.active_turn?, do: retry!(fn -> await_owner_idle!(owner, limit) end, limit, "receipt committed but owner did not finish the predecessor"), else: :ok
+  end
+
+  defp release_receipt_after_active_observation!(owner, hold) do
+    assert_receive {:retained_usage_committed, worker, ^hold}, @timeout
+    on_exit(fn -> send(worker, {:release_retained_usage, hold}) end)
+    parent = self()
+    mfa = {WebsocketOwnerSession, :owner_status, 1}
+    on_exit(fn -> :erlang.trace_pattern(mfa, false, [:local]) end)
+
+    releaser =
+      Task.async(fn ->
+        receive do
+          {:trace, ^parent, :return_from, ^mfa, {:ok, %{active_turn?: true}}} ->
+            send(worker, {:release_retained_usage, hold})
+            :active_observed
+        after
+          @timeout -> flunk("successor readiness never observed the committed receipt still active")
+        end
+      end)
+
+    monitor = Process.monitor(releaser.pid)
+    :erlang.trace_pattern(mfa, [{:_, [], [{:return_trace}]}], [:local])
+    :erlang.trace(parent, true, [:call, {:tracer, releaser.pid}])
+    record_evidence(%{scenario: "committed_receipt_before_owner_completion", owner_node_distinct: node(owner) != node(), receipt_worker_node_distinct: node(worker) != node()})
+    {releaser, monitor, mfa}
+  end
+
+  defp finish_receipt_releaser!({releaser, monitor, mfa}) do
+    assert Task.await(releaser, @timeout) == :active_observed
+    assert_receive {:DOWN, ^monitor, :process, _, :normal}, @timeout
+    :erlang.trace(self(), false, [:call])
+    :erlang.trace_pattern(mfa, false, [:local])
   end
 
   defp assert_namespace! do
@@ -522,7 +588,12 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RetainedUs
     send(owner, {:websocket_owner_terminal_delivery_timeout, turn_ref, timer_token})
   end
 
-  defp interrupt!(:drain, owner, _pending), do: assert(:ok = WebsocketOwnerSession.drain_owner(owner))
+  defp interrupt!(:drain, owner, pending) do
+    monitor = Process.monitor(owner)
+    assert :ok = WebsocketOwnerSession.drain_owner(owner)
+    assert_receive {:DOWN, ^monitor, :process, ^owner, :normal}, @timeout
+    assert Repo.get_by!(BridgeOwnerLease, codex_session_id: pending.codex_session_id, lease_token: pending.owner_lease_token).status == "released"
+  end
 
   defp interrupt!(:retirement, owner, pending) do
     owner_monitor = Process.monitor(owner)
