@@ -1572,7 +1572,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle do
       status: request.status
     })
 
-    Events.broadcast_usage(request.pool_id, "usage_updated", %{
+    Events.broadcast_usage_after_commit(request.pool_id, "usage_updated", %{
       request_id: request.id,
       status: request.status,
       usage_status: request.usage_status

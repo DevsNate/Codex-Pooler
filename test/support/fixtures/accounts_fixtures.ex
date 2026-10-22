@@ -219,6 +219,13 @@ defmodule CodexPooler.AccountsFixtures do
         where: event.actor_user_id in ^dumped_user_ids or event.pool_id in ^pool_ids
     )
 
+    outbox_pool_ids = Enum.map(pool_ids, &Ecto.UUID.load!/1)
+
+    Repo.delete_all(
+      from event in CodexPooler.Events.OutboxEntry,
+        where: fragment("?::jsonb->>'pool_id'", event.payload) in ^outbox_pool_ids
+    )
+
     Repo.delete_all(from pool in "pools", where: pool.id in ^pool_ids)
 
     Repo.delete_all(

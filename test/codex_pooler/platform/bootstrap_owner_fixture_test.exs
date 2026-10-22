@@ -15,6 +15,10 @@ defmodule CodexPooler.BootstrapOwnerFixtureTest do
 
   alias CodexPooler.Accounts
   alias CodexPooler.Accounts.User
+  alias CodexPooler.Events
+  alias CodexPooler.Events.OutboxEntry
+  alias CodexPooler.PoolerFixtures
+  alias CodexPooler.Pools.Pool
 
   test "raises instead of handing out a committed owner this test did not create",
        %{sandbox_owner: owner, sandbox_settings_cache: cache} do
@@ -60,6 +64,26 @@ defmodule CodexPooler.BootstrapOwnerFixtureTest do
     on_exit(fn -> stop_sandbox(owner, cache) end)
 
     assert %{user: %User{id: ^id}} = bootstrap_owner_fixture()
+  end
+
+  test "deleting an owner graph removes only its Pools' pending invalidations" do
+    %{user: owner} = bootstrap_owner_fixture()
+    deleted = PoolerFixtures.pool_fixture(%{created_by_user_id: owner.id})
+    kept = PoolerFixtures.pool_fixture()
+
+    assert {:ok, {:ok, deleted_event}} =
+             Repo.transaction(fn -> Events.broadcast_request_logs(deleted.id, "request_reserved") end)
+
+    assert {:ok, {:ok, kept_event}} =
+             Repo.transaction(fn -> Events.broadcast_request_logs(kept.id, "request_reserved") end)
+
+    delete_user_graph!([owner.id])
+
+    refute Repo.get(User, owner.id)
+    refute Repo.get(Pool, deleted.id)
+    refute Repo.get(OutboxEntry, deleted_event.id)
+    assert Repo.get!(Pool, kept.id)
+    assert Repo.get!(OutboxEntry, kept_event.id)
   end
 
   defp delete_users_by_email!(email) do

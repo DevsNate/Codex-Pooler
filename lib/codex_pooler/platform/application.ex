@@ -38,6 +38,7 @@ defmodule CodexPooler.Application do
       {Phoenix.PubSub, name: CodexPooler.PubSub},
       {Postgrex.Notifications, postgres_notifications_config()},
       CodexPooler.Events.PostgresBridge,
+      CodexPooler.Events.OutboxDispatcher,
       CodexPooler.InstanceSettings.Cache,
       CodexPooler.Accounting.ExecutionRecovery,
       {CodexPooler.Platform.JobRuntime, Application.fetch_env!(:codex_pooler, Oban)},

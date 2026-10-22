@@ -7,10 +7,13 @@ defmodule CodexPoolerWeb.Runtime.AnchoredOwnerDrainSupport do
 
   alias CodexPooler.Access
   alias CodexPooler.FakeUpstream
+  alias CodexPooler.Gateway.Transports.Websocket.ActivityRegistry
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
   alias CodexPooler.InstanceSettings
   alias CodexPooler.Repo
   alias CodexPoolerWeb.CodexResponsesSocket
+  alias CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport
+  alias CodexPoolerWeb.Runtime.WebsocketCleanupFence
   alias Ecto.Adapters.SQL.Sandbox
 
   @budget 15_000
@@ -63,8 +66,13 @@ defmodule CodexPoolerWeb.Runtime.AnchoredOwnerDrainSupport do
       )
 
     setup = gateway_setup(upstream)
+    socket = self()
 
     on_exit(fn ->
+      BackendCodexWebsocketOwnerForwardingSupport.stop_pool_owners!(setup.pool)
+      :ok = WebsocketCleanupFence.await_session_cleanups!()
+      await_socket_receipts!(socket, System.monotonic_time(:millisecond) + @budget)
+
       Sandbox.unboxed_run(Repo, fn ->
         CodexPooler.PoolerFixtures.delete_committed_pools!([setup.pool.id])
         Repo.delete!(setup.identity)
@@ -86,6 +94,24 @@ defmodule CodexPoolerWeb.Runtime.AnchoredOwnerDrainSupport do
     end)
 
     {setup, upstream, state, release_ref}
+  end
+
+  # The test process stands in for the socket. Its exit can hand a receipt to
+  # a fallback writer after terminate/2 returned; keep its Pool until that
+  # writer acknowledges the database commit.
+  defp await_socket_receipts!(socket, deadline) do
+    %{delivery_receipts: receipts} = :sys.get_state(ActivityRegistry, max(deadline - System.monotonic_time(:millisecond), 1))
+    owned = for {_token, %{socket: ^socket} = entry} <- receipts, do: entry
+    assert Enum.all?(owned, &(not &1.finished? or &1.result == :ok)), "fixture socket receipt failed before cleanup"
+
+    if Enum.any?(owned, &(not &1.finished?)) do
+      assert System.monotonic_time(:millisecond) < deadline, "fixture socket receipt did not finish before cleanup"
+
+      receive do
+      after
+        5 -> await_socket_receipts!(socket, deadline)
+      end
+    end
   end
 
   defp completed_tool_response do

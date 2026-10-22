@@ -5,6 +5,8 @@ defmodule CodexPooler.EventsTest do
   alias CodexPooler.Accounting.RequestLifecycle.Reservation
   alias CodexPooler.Events
   alias CodexPooler.Events.Event
+  alias CodexPooler.Events.Outbox
+  alias CodexPooler.Events.OutboxEntry
   alias CodexPooler.Events.PostgresBridge
   alias CodexPooler.Gateway.Persistence.SessionContinuity
   alias CodexPooler.Gateway.Websocket
@@ -18,6 +20,7 @@ defmodule CodexPooler.EventsTest do
 
   test "nested request log publication waits for the outer commit and is visible on another connection" do
     pool_id = Ecto.UUID.generate()
+    register_outbox_cleanup!(pool_id)
     assert :ok = Events.subscribe_pool(pool_id, "request_logs")
     parent = self()
     release = make_ref()
@@ -39,10 +42,12 @@ defmodule CodexPooler.EventsTest do
       end)
 
     assert_receive {:nested_finished, event}, @commit_detection_timeout_ms
+    assert {:ok, 0} = run_unboxed(fn -> Outbox.drain() end)
     # The outer transaction outlives the request-log view's 250 ms debounce.
     refute_receive {Events, ^event}, 300
     send(writer.pid, release)
     assert {:ok, ^event} = Task.await(writer, @commit_detection_timeout_ms)
+    assert {:ok, 1} = run_unboxed(fn -> Outbox.drain() end)
     assert_receive {Events, ^event}, @commit_detection_timeout_ms
     assert_transaction_marker!(pool_id)
     refute_received {Events, ^event}
@@ -67,6 +72,8 @@ defmodule CodexPooler.EventsTest do
         key |> Map.put(:model, model) |> Map.put(:claim, claim) |> Map.put(:opts, Map.put(opts, :turn_claim, claim))
       end)
 
+    register_outbox_cleanup!(setup.pool.id)
+    assert {:ok, _} = run_unboxed(fn -> Outbox.drain() end)
     assert :ok = Events.subscribe_pool(setup.pool, "request_logs")
     reader = start_supervised!({Postgrex, Keyword.take(Repo.config(), [:hostname, :port, :database, :username, :password, :ssl])})
     [[reader_backend]] = Postgrex.query!(reader, "SELECT pg_backend_pid()", []).rows
@@ -80,6 +87,7 @@ defmodule CodexPooler.EventsTest do
     refute_receive {Events, %{payload: %{"request_id" => ^request_id}}}, 300
     send(writer.pid, release)
     assert {:ok, %{status: "in_progress"}} = Task.await(writer, @commit_detection_timeout_ms)
+    assert {:ok, 1} = run_unboxed(fn -> Outbox.drain() end)
     assert_receive {Events, %{reason: "request_reserved", payload: %{"request_id" => ^request_id}} = event}, @commit_detection_timeout_ms
     assert Postgrex.query!(reader, "SELECT status FROM requests WHERE id = $1", [Ecto.UUID.dump!(request_id)]).rows == [["in_progress"]]
     assert_transaction_marker!(setup.pool.id)
@@ -89,6 +97,7 @@ defmodule CodexPooler.EventsTest do
   for rollback <- [:outer, :nested] do
     test "#{rollback} rollback publishes no request log invalidation" do
       pool_id = Ecto.UUID.generate()
+      register_outbox_cleanup!(pool_id)
       assert :ok = Events.subscribe_pool(pool_id, "request_logs")
       rollback = unquote(rollback)
       parent = self()
@@ -104,9 +113,56 @@ defmodule CodexPooler.EventsTest do
 
       assert match?({:error, _}, result)
       assert_receive {:rolled_back_event, event}
+      assert {:ok, 0} = run_unboxed(fn -> Outbox.drain() end)
       assert_transaction_marker!(pool_id)
       refute_received {Events, ^event}
     end
+  end
+
+  test "transactional usage waits for commit and rolls back with its producer" do
+    pool_id = Ecto.UUID.generate()
+    register_outbox_cleanup!(pool_id)
+    assert :ok = Events.subscribe_pool(pool_id)
+    parent = self()
+    release = make_ref()
+
+    writer =
+      Task.async(fn ->
+        Sandbox.unboxed_run(Repo, fn ->
+          Repo.transaction(fn ->
+            {:ok, event} = Events.broadcast_usage_after_commit(pool_id, "usage_updated", %{status: "failed", usage_status: "usage_unknown"})
+            send(parent, {:usage_held, event})
+            await_release!(release, event)
+          end)
+        end)
+      end)
+
+    on_exit(fn -> send(writer.pid, release) end)
+    assert_receive {:usage_held, event}, @commit_detection_timeout_ms
+    assert {:ok, 0} = run_unboxed(fn -> Outbox.drain() end)
+    refute_received {Events, ^event}
+    send(writer.pid, release)
+    assert {:ok, ^event} = Task.await(writer, @commit_detection_timeout_ms)
+    assert {:ok, 1} = run_unboxed(fn -> Outbox.drain() end)
+    assert_receive {Events, ^event}, @commit_detection_timeout_ms
+
+    assert {:error, aborted} =
+             run_unboxed(fn ->
+               Repo.transaction(fn ->
+                 {:ok, event} = Events.broadcast_usage_after_commit(pool_id, "usage_updated")
+                 Repo.rollback(event)
+               end)
+             end)
+
+    assert {:ok, 0} = run_unboxed(fn -> Outbox.drain() end)
+    assert_transaction_marker!(pool_id)
+    refute_received {Events, ^aborted}
+  end
+
+  defp register_outbox_cleanup!(pool_id) do
+    register_unboxed_cleanup!(fn ->
+      Repo.delete_all(from event in OutboxEntry, where: fragment("?::jsonb->>'pool_id'", event.payload) == ^pool_id)
+    end)
   end
 
   defp held_reservation(setup, parent, release) do

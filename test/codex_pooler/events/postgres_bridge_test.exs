@@ -3,7 +3,7 @@ defmodule CodexPooler.Events.PostgresBridgeTest do
 
   alias CodexPooler.Alerts.Incidents.NotificationEvents
   alias CodexPooler.Events
-  alias CodexPooler.Events.{Event, PostgresBridge}
+  alias CodexPooler.Events.{Event, Outbox, OutboxEntry, PostgresBridge}
   alias CodexPooler.Repo
   alias CodexPooler.Status.Events, as: StatusEvents
   alias CodexPooler.UnboxedFixture
@@ -72,6 +72,11 @@ defmodule CodexPooler.Events.PostgresBridgeTest do
     lookup = :sys.get_state(bridge).pubsub_nodes
     await_pubsub_peer!(lookup, remote, System.monotonic_time(:millisecond) + 10_000)
     pool_id = Ecto.UUID.generate()
+
+    UnboxedFixture.register_unboxed_cleanup!(fn ->
+      Repo.delete_all(from event in OutboxEntry, where: fragment("?::jsonb->>'pool_id'", event.payload) == ^pool_id)
+    end)
+
     assert :ok = Events.subscribe_pool(pool_id, "request_logs")
     assert true = :peer.call(peer, CodexPooler.EventsPeer, :subscribe, [pool_id])
 
@@ -88,23 +93,27 @@ defmodule CodexPooler.Events.PostgresBridgeTest do
     writer = Task.async(fn -> publish_held_event(pool_id, parent, release) end)
 
     assert_receive {:peer_transaction_held, event}, @relay_detection_timeout_ms
+    assert {:ok, 0} = UnboxedFixture.run_unboxed(fn -> Outbox.drain() end)
     refute_receive {Events, ^event}, 300
     assert :peer.call(peer, CodexPooler.EventsPeer, :events, []) == []
     send(writer.pid, release)
     assert {:ok, ^event} = Task.await(writer, @relay_detection_timeout_ms)
+    assert {:ok, 1} = UnboxedFixture.run_unboxed(fn -> Outbox.drain() end)
     assert_receive {Events, ^event}, @relay_detection_timeout_ms
 
     {:error, rolled_back} =
       UnboxedFixture.run_unboxed(fn ->
         Repo.transaction(fn ->
-          {:ok, aborted} = Events.broadcast_request_logs(pool_id, "request_aborted")
+          {:ok, aborted} = Events.broadcast_request_logs(pool_id, "request_finalized")
           Repo.rollback(aborted)
         end)
       end)
 
+    assert {:ok, 0} = UnboxedFixture.run_unboxed(fn -> Outbox.drain() end)
+
     {:ok, {:ok, marker}} =
       UnboxedFixture.run_unboxed(fn ->
-        Repo.transaction(fn -> Events.broadcast_request_logs(pool_id, "peer_commit_barrier") end)
+        Repo.transaction(fn -> Events.broadcast_pool_event_after_commit(pool_id, ["request_logs"], "peer_commit_barrier") end)
       end)
 
     assert_receive {Events, ^marker}, @relay_detection_timeout_ms

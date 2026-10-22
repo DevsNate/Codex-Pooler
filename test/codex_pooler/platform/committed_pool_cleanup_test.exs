@@ -18,6 +18,8 @@ defmodule CodexPooler.Platform.CommittedPoolCleanupTest do
 
   alias CodexPooler.Access.APIKey
   alias CodexPooler.Accounts.User
+  alias CodexPooler.Events
+  alias CodexPooler.Events.OutboxEntry
   alias CodexPooler.Jobs.TokenRefreshWorker
   alias CodexPooler.Pools.Pool
   alias CodexPooler.Upstreams.Assignments.PoolAssignments
@@ -41,6 +43,23 @@ defmodule CodexPooler.Platform.CommittedPoolCleanupTest do
     refute Repo.get(Oban.Job, job.id)
 
     assert delete_committed_pools!([pool.id]) == 0
+  end
+
+  test "cleanup removes only its Pool's pending accounting invalidations" do
+    deleted = pool_fixture()
+    kept = pool_fixture()
+
+    assert {:ok, {:ok, deleted_event}} =
+             Repo.transaction(fn -> Events.broadcast_request_logs(deleted.id, "request_reserved") end)
+
+    assert {:ok, {:ok, kept_event}} =
+             Repo.transaction(fn -> Events.broadcast_request_logs(kept.id, "request_reserved") end)
+
+    assert delete_committed_pools!([deleted.id]) == 1
+    refute Repo.get(OutboxEntry, deleted_event.id)
+    assert Repo.get!(OutboxEntry, kept_event.id)
+    assert delete_committed_pools!([deleted.id]) == 0
+    assert Repo.get!(OutboxEntry, kept_event.id)
   end
 
   test "a Pool sharing the deleted Pool's identity keeps that identity's job" do

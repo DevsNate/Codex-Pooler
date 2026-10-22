@@ -25,6 +25,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.DownstreamKeepaliveTest d
 
   alias CodexPooler.Accounting.{LedgerEntry, Request, RequestOutcome}
   alias CodexPooler.Events
+  alias CodexPooler.Events.OutboxDispatcher
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Repo
   alias CodexPoolerWeb.Runtime.BackendCodexTestSupport
@@ -43,6 +44,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.DownstreamKeepaliveTest d
     on_exit(fn -> Sandbox.mode(Repo, :manual) end)
     :ok = Sandbox.mode(Repo, :auto)
     put_settings!([websocket_idle_timeout_ms: @idle_timeout_ms], forwarding?)
+    start_supervised!({OutboxDispatcher, enabled: true, name: nil})
+    :ok
   end
 
   for forwarding? <- [false, true], mode <- ["full", "lite"] do
@@ -102,6 +105,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.DownstreamKeepaliveTest d
     end
 
     @tag forwarding: forwarding?
+    @tag slow: "observes the real one-second outbox poll after the peer closes its turn"
     test "#{topology}: an ordinary peer close retains client cancellation without idle attribution" do
       hold = make_ref()
       upstream = start_upstream(FakeUpstream.strict_sequence([turn_request(FakeUpstream.barrier_websocket_frames(encoded_events("resp_peer_close", 1), notify: self(), release_ref: hold))]))

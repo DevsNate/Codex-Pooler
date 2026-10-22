@@ -68,6 +68,13 @@ defmodule CodexPooler.PoolerFixtures do
 
     Repo.delete_all(from event in "audit_events", where: event.pool_id in ^dumped_pool_ids)
 
+    # Pending invalidations deliberately have no foreign key to hot Pool rows.
+    # Remove only this fixture's events; unrelated pending delivery is preserved.
+    Repo.delete_all(
+      from event in CodexPooler.Events.OutboxEntry,
+        where: fragment("?::jsonb->>'pool_id'", event.payload) in ^pool_ids
+    )
+
     # Keyed by attempt without a foreign key, so the Pool's cascade misses them
     # (findings#290).
     Repo.delete_all(

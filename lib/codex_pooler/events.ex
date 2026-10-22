@@ -9,6 +9,7 @@ defmodule CodexPooler.Events do
 
   alias CodexPooler.Events.DashboardSessions, as: DashboardSessionEvents
   alias CodexPooler.Events.Event
+  alias CodexPooler.Events.Outbox
   alias CodexPooler.Pools.Pool
   alias CodexPooler.Repo
   alias Phoenix.PubSub
@@ -113,12 +114,17 @@ defmodule CodexPooler.Events do
 
   @spec broadcast_request_logs(pool_ref(), reason(), payload()) :: broadcast_result()
   def broadcast_request_logs(pool_or_id, reason, payload \\ %{}) do
-    broadcast_pool_event_after_commit(pool_or_id, [@request_logs], reason, payload)
+    broadcast_pool_event(pool_or_id, [@request_logs], reason, payload, :deferred_after_commit)
   end
 
   @spec broadcast_usage(pool_ref(), reason(), payload()) :: broadcast_result()
   def broadcast_usage(pool_or_id, reason, payload \\ %{}) do
     broadcast_pool_event(pool_or_id, [@usage], reason, payload)
+  end
+
+  @spec broadcast_usage_after_commit(pool_ref(), reason(), payload()) :: broadcast_result()
+  def broadcast_usage_after_commit(pool_or_id, reason, payload \\ %{}) do
+    broadcast_pool_event(pool_or_id, [@usage], reason, payload, :deferred_after_commit)
   end
 
   @spec broadcast_job_status(pool_ref(), reason(), payload()) :: broadcast_result()
@@ -315,6 +321,21 @@ defmodule CodexPooler.Events do
   end
 
   defp normalize_payload(_payload), do: %{}
+
+  defp broadcast_event(%Event{} = event, :deferred_after_commit) do
+    if Repo.in_transaction?() do
+      case Outbox.enqueue(event) do
+        :ok ->
+          {:ok, event}
+
+        {:error, _reason} ->
+          Logger.warning("pool event postgres relay failed")
+          {:error, :postgres_event_relay_failed}
+      end
+    else
+      broadcast_immediate_event(event)
+    end
+  end
 
   defp broadcast_event(%Event{} = event, :after_commit) do
     if Repo.in_transaction?() do

@@ -44,6 +44,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexControllerTest do
   alias CodexPooler.Accounting.{Attempt, Request, RequestLogFact, RequestLogs}
   alias CodexPooler.Accounting.LedgerEntry
   alias CodexPooler.Audit.AuditEvent
+  alias CodexPooler.Events.OutboxDispatcher
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Files
   alias CodexPooler.Files.FileRecord
@@ -94,6 +95,17 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexControllerTest do
       "type" => "server_error"
     }
   }
+
+  setup context do
+    if context[:committed_event_dispatcher] do
+      CodexPooler.DataCase.stop_sandbox(context.sandbox_owner, context.sandbox_settings_cache)
+      owner = Sandbox.start_owner!(Repo, sandbox: false, shared: true)
+      on_exit(fn -> Sandbox.stop_owner(owner) end)
+      start_supervised!({OutboxDispatcher, enabled: true, name: nil})
+    end
+
+    :ok
+  end
 
   @tag :native_sse_epoch_stale
   test "native SSE epoch-stale refusal after authentication returns 401 without upstream work" do
@@ -11405,6 +11417,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexControllerTest do
     assert request.last_error_code == "upstream_network_error"
   end
 
+  @tag committed_event_dispatcher: true
+  @tag slow: "observes the real one-second outbox poll before releasing the held routing circuit"
   test "POST /backend-api/codex/responses finalizes reservation when all planned candidates reject at circuit begin",
        %{
          conn: conn
@@ -11674,6 +11688,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexControllerTest do
            ) == 0
   end
 
+  @tag committed_event_dispatcher: true
+  @tag slow: "observes the real one-second outbox poll before releasing the held routing circuit"
   test "POST /backend-api/codex/responses retries the next planned candidate after circuit begin rejects",
        %{
          conn: conn

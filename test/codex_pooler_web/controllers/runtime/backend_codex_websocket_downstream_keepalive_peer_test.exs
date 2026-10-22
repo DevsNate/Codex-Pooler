@@ -23,6 +23,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketDownstreamKeepalivePeerTes
   # that the first progress Ping reaches a responsive client in time.
   use CodexPoolerWeb.ConnCase, async: false
 
+  alias CodexPooler.Events.Outbox
   alias CodexPooler.Platform.ExecutionRegistry
 
   import Ecto.Query, only: [from: 2]
@@ -144,6 +145,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketDownstreamKeepalivePeerTes
 
       assert_executor_receipt_committed(executor)
       WebsocketCleanupFence.await_session_cleanups!()
+      assert {:ok, _} = CodexPooler.UnboxedFixture.run_unboxed(fn -> Outbox.drain() end)
       request = assert_request_settled!(setup, "failed", "client_disconnected")
       assert_idle_attribution!(CodexPooler.Repo.reload!(request), if(turn.pings > 0, do: "pong_observed", else: "unknown"))
       close_client!(turn.client)

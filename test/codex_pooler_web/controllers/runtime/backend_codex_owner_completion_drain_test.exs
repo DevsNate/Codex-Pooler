@@ -11,7 +11,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexOwnerCompletionDrainTest do
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Gateway.Persistence.{BridgeOwnerLease, CodexTurn}
   alias CodexPooler.Gateway.Runtime.Finalization.Interruption
-  alias CodexPooler.Gateway.Transports.Websocket.{OwnerDefaults, WebsocketOwnerSession}
+  alias CodexPooler.Gateway.Transports.Websocket.{ActivityRegistry, OwnerDefaults, WebsocketOwnerSession}
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession.Persistence
   alias CodexPooler.Repo
   alias CodexPoolerWeb.CodexResponsesSocket
@@ -224,6 +224,13 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexOwnerCompletionDrainTest do
       end
 
       assert :ok = CodexResponsesSocket.terminate(:closed, state)
+
+      if unquote(disposition) == :deadline do
+        socket = self()
+        %{delivery_receipts: receipts} = :sys.get_state(ActivityRegistry)
+        pending = Enum.find_value(receipts, fn {_token, entry} -> if entry.identity.request_id == request.id, do: entry end)
+        assert %{socket: ^socket, task: ^caller, finished?: false} = pending
+      end
     end
   end
 

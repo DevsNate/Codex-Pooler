@@ -8,6 +8,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsCommitLiveTest do
   alias CodexPooler.Accounting.RequestLifecycle.Reservation
   alias CodexPooler.Accounts.Scope
   alias CodexPooler.Events
+  alias CodexPooler.Events.Outbox
   alias CodexPooler.Gateway.Persistence.SessionContinuity
   alias CodexPooler.Gateway.Websocket
   alias CodexPooler.Pools
@@ -30,6 +31,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsCommitLiveTest do
     opts = %{codex_session: session, endpoint: "/backend-api/codex/responses", requested_model: model.exposed_model_id, correlation_id: Ecto.UUID.generate(), transport: "websocket"}
     {:ok, %{request: request}} = Accounting.claim_websocket_turn(setup, model, opts)
     assert request.status == "accepted"
+    assert {:ok, _} = Outbox.drain()
     row = "#request-log-row-#{request.id}"
     {:ok, view, _} = live(conn, ~p"/admin/request-logs?pool_id=#{pool.id}")
     await_row!(view, row <> "[data-status='accepted']", deadline())
@@ -39,11 +41,13 @@ defmodule CodexPoolerWeb.Admin.RequestLogsCommitLiveTest do
     release = make_ref()
     writer = Task.async(fn -> reserve_held!(setup, model, Map.put(opts, :turn_claim, request), parent, release) end)
     assert_receive :reservation_held, @detection_timeout_ms
+    assert {:ok, 0} = Outbox.drain()
     # Reproduce the production bug: the 250 ms debounce finishes while the outer commit is held.
     refute_receive {Events, %{reason: "request_reserved"}}, 300
     assert has_element?(view, row <> "[data-status='accepted']")
     send(writer.pid, release)
     assert {:ok, %{request: %{status: "in_progress"}}} = Task.await(writer, @detection_timeout_ms)
+    assert {:ok, 1} = Outbox.drain()
     assert_receive {Events, %{reason: "request_reserved"}}, @detection_timeout_ms
     await_row!(view, row <> "[data-status='in_progress']", deadline())
     assert :sys.get_state(view.pid).socket.assigns.request_logs_generation == generation + 1

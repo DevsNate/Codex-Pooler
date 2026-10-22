@@ -7,6 +7,7 @@ defmodule CodexPoolerWeb.Admin.StatsClientCancellationsLiveTest do
   import Ecto.Query
 
   alias CodexPooler.Accounting
+  alias CodexPooler.Events.Outbox
   alias CodexPooler.Pools
   alias CodexPooler.Repo
   alias Ecto.Adapters.SQL.Sandbox
@@ -56,6 +57,7 @@ defmodule CodexPoolerWeb.Admin.StatsClientCancellationsLiveTest do
                Repo.transaction(fn -> Accounting.finalize_success_with_disposition(request, attempt, known_usage()) end)
              end)
 
+    assert {:ok, 2} = Outbox.drain()
     assert correction.request.status == "failed"
     await_corrected_totals!(view, generation, deadline())
     assert has_element?(view, "#stats-kpi-requests", "0 succeeded · 0 failed · 1 client cancelled")
@@ -87,6 +89,7 @@ defmodule CodexPoolerWeb.Admin.StatsClientCancellationsLiveTest do
                end)
              end)
 
+    assert {:ok, 2} = Outbox.drain()
     assert correction.settlement.id == initial.settlement.id
     await_corrected_totals!(view, generation, deadline())
     assert has_element?(view, "#stats-kpi-requests", "0 succeeded · 0 failed · 1 client cancelled")
