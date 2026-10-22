@@ -35,8 +35,11 @@ defmodule CodexPoolerWeb.V1.ResponsesStreamedTerminalOutputTest do
   @moduletag capture_log: true
 
   @reply "synthetic streamed reply"
+  @citation %{"type" => "url_citation", "url" => "https://example.com/synthetic-source", "title" => "Synthetic source", "start_index" => 0, "end_index" => 9}
+  @text_part %{"type" => "output_text", "text" => @reply, "annotations" => [@citation]}
   @reasoning %{"type" => "reasoning", "id" => "rs_synthetic_streamed", "summary" => [], "encrypted_content" => "gAAAAA-synthetic-closed-reasoning"}
-  @message %{"type" => "message", "id" => "msg_synthetic_streamed", "role" => "assistant", "status" => "completed", "content" => [%{"type" => "output_text", "text" => @reply, "annotations" => []}]}
+  @message %{"type" => "message", "id" => "msg_synthetic_streamed", "role" => "assistant", "status" => "completed", "content" => [@text_part]}
+  @search %{"type" => "web_search_call", "id" => "ws_synthetic_citation", "status" => "completed", "action" => %{"type" => "search", "query" => "synthetic source lookup"}}
   @call_a %{"type" => "function_call", "id" => "fc_synthetic_streamed_a", "call_id" => "call_synthetic_streamed_a", "name" => "lookup_fixture", "arguments" => ~s({"key":"a"}), "status" => "completed"}
   @call_b %{"type" => "function_call", "id" => "fc_synthetic_streamed_b", "call_id" => "call_synthetic_streamed_b", "name" => "lookup_fixture", "arguments" => ~s({"key":"b"}), "status" => "completed"}
   @tool %{"type" => "function", "name" => "lookup_fixture", "description" => "synthetic fixture lookup", "parameters" => %{"type" => "object", "properties" => %{"key" => %{"type" => "string"}}, "required" => ["key"], "additionalProperties" => false}}
@@ -77,6 +80,24 @@ defmodule CodexPoolerWeb.V1.ResponsesStreamedTerminalOutputTest do
         assert_item_events!(events, [@reasoning, @message])
         assert terminal!(events, "response.completed")["response"]["output"] == [@message]
         assert_topology!(transport, mode, upstream)
+      end
+    end
+  end
+
+  describe "a hosted-search reply supplied only in the completed terminal" do
+    for transport <- @transports, mode <- @modes do
+      @tag transport: transport, mode: mode
+      test "preserves URL citations (#{transport}, #{mode})", %{transport: transport, mode: mode} do
+        assert_terminal_only_citation!(transport, mode)
+      end
+    end
+  end
+
+  describe "URL citations supplied after an annotation-free completed message" do
+    for transport <- @transports, mode <- @modes do
+      @tag transport: transport, mode: mode
+      test "keeps the terminal citations instead of the earlier done item (#{transport}, #{mode})", %{transport: transport, mode: mode} do
+        assert_late_terminal_citation!(transport, mode)
       end
     end
   end
@@ -168,25 +189,59 @@ defmodule CodexPoolerWeb.V1.ResponsesStreamedTerminalOutputTest do
 
   # The measured order: a reasoning item, then the reply message with its text, then the terminal; the terminal lists
   # `output` as given.
-  defp message_turn(terminal_type, output) do
+  defp message_turn(terminal_type, output, message \\ @message) do
     status = String.replace_prefix(terminal_type, "response.", "")
     response = response_body(status, output)
     response = if status == "incomplete", do: Map.put(response, "incomplete_details", %{"reason" => "max_output_tokens"}), else: response
-    address = %{"item_id" => @message["id"], "output_index" => 1, "content_index" => 0}
+    address = %{"item_id" => message["id"], "output_index" => 1, "content_index" => 0}
     part = %{"type" => "output_text", "text" => "", "annotations" => []}
+    [completed_part] = message["content"]
 
     opening() ++
       [
         {"response.output_item.added", %{"type" => "response.output_item.added", "output_index" => 0, "item" => Map.delete(@reasoning, "encrypted_content")}},
         {"response.output_item.done", %{"type" => "response.output_item.done", "output_index" => 0, "item" => @reasoning}},
-        {"response.output_item.added", %{"type" => "response.output_item.added", "output_index" => 1, "item" => %{@message | "status" => "in_progress", "content" => []}}},
+        {"response.output_item.added", %{"type" => "response.output_item.added", "output_index" => 1, "item" => %{message | "status" => "in_progress", "content" => []}}},
         {"response.content_part.added", Map.merge(address, %{"type" => "response.content_part.added", "part" => part})},
         {"response.output_text.delta", Map.merge(address, %{"type" => "response.output_text.delta", "delta" => @reply})},
         {"response.output_text.done", Map.merge(address, %{"type" => "response.output_text.done", "text" => @reply})},
-        {"response.content_part.done", Map.merge(address, %{"type" => "response.content_part.done", "part" => %{part | "text" => @reply}})},
-        {"response.output_item.done", %{"type" => "response.output_item.done", "output_index" => 1, "item" => @message}},
+        {"response.content_part.done", Map.merge(address, %{"type" => "response.content_part.done", "part" => completed_part})},
+        {"response.output_item.done", %{"type" => "response.output_item.done", "output_index" => 1, "item" => message}},
         {terminal_type, %{"type" => terminal_type, "response" => response}}
       ]
+  end
+
+  defp assert_terminal_only_citation!(transport, mode) do
+    output = [@search, @message]
+    upstream_events = [{"response.completed", %{"type" => "response.completed", "response" => response_body("completed", output)}}]
+    {events, upstream} = run_turn!(transport, mode, upstream_events)
+
+    assert terminal!(events, "response.completed")["response"]["output"] == output
+    assert sdk_final_output_text(events) == @reply
+    assert_topology!(transport, mode, upstream)
+
+    if transport in [:http_sse, :bridged_sse], do: assert_synthesized_citation_events!(events)
+  end
+
+  defp assert_synthesized_citation_events!(events) do
+    assert [added] = Enum.filter(events, &(&1["type"] == "response.content_part.added"))
+    assert added["part"] == %{@text_part | "text" => "", "annotations" => []}
+    assert [delta] = Enum.filter(events, &(&1["type"] == "response.output_text.delta"))
+    assert delta["delta"] == @reply
+    refute Map.has_key?(delta, "annotations")
+    assert [done] = Enum.filter(events, &(&1["type"] == "response.content_part.done"))
+    assert done["part"] == @text_part
+    assert_item_events!(events, [@search, @message])
+  end
+
+  defp assert_late_terminal_citation!(transport, mode) do
+    uncited_message = %{@message | "content" => [%{@text_part | "annotations" => []}]}
+    {events, upstream} = run_turn!(transport, mode, message_turn("response.completed", [@message], uncited_message))
+
+    assert_item_events!(events, [@reasoning, uncited_message])
+    assert terminal!(events, "response.completed")["response"]["output"] == [@message]
+    assert sdk_final_output_text(events) == @reply
+    assert_topology!(transport, mode, upstream)
   end
 
   defp interleaved_turn do
