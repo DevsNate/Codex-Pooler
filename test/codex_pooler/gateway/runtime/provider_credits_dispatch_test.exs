@@ -377,9 +377,11 @@ defmodule CodexPooler.Gateway.Runtime.ProviderCreditsDispatchTest do
     end)
 
     {_server, port} = SocketSupport.start_public_endpoint_with_server!()
+    before = WebsocketCleanupFence.listener_sockets()
     {conn, websocket, reference} = SocketSupport.public_websocket_connect!(port, setup, Ecto.UUID.generate(), path)
     socket = Mint.HTTP.get_socket(conn)
     on_exit(fn -> :gen_tcp.close(socket) end)
+    socket_pid = WebsocketCleanupFence.await_new_listener_socket!(before)
     frame = CodexPooler.JSON.encode!(%{"type" => "response.create", "model" => setup.model.exposed_model_id, "input" => [%{"type" => "message", "role" => "user", "content" => [%{"type" => "input_text", "text" => "synthetic"}]}], "stream" => true})
     {conn, websocket} = SocketSupport.public_websocket_send_text!(conn, websocket, reference, frame)
     {conn, _websocket, terminal} = receive_terminal(conn, websocket, reference)
@@ -388,6 +390,7 @@ defmodule CodexPooler.Gateway.Runtime.ProviderCreditsDispatchTest do
     assert generation_count(fixture) == 1
 
     Mint.HTTP.close(conn)
+    WebsocketCleanupFence.await_listener_socket_teardown!(socket_pid)
     assert FakeUpstream.physical_counts(fixture.upstream).consume == 0
   end
 
@@ -438,7 +441,7 @@ defmodule CodexPooler.Gateway.Runtime.ProviderCreditsDispatchTest do
     end
 
     Mint.HTTP.close(conn)
-    WebsocketCleanupFence.await_listener_socket_cleanup!(socket_pid)
+    WebsocketCleanupFence.await_listener_socket_teardown!(socket_pid)
   end
 
   for mode <- [:full, :lite], operation <- [:anchored, :steer, :compact] do
@@ -1623,7 +1626,7 @@ defmodule CodexPooler.Gateway.Runtime.ProviderCreditsDispatchTest do
 
   defp close_client!(client) do
     Mint.HTTP.close(client.conn)
-    WebsocketCleanupFence.await_listener_socket_cleanup!(client.socket)
+    WebsocketCleanupFence.await_listener_socket_teardown!(client.socket)
   end
 
   defp hold_socket_generation!(client, payload) do

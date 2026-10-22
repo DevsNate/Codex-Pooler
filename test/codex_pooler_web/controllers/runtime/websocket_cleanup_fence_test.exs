@@ -3,6 +3,7 @@ defmodule CodexPoolerWeb.Runtime.WebsocketCleanupFenceTest do
 
   import ExUnit.CaptureLog
 
+  alias CodexPooler.Gateway.Websocket.DeliveryReceiptHandoff
   alias CodexPoolerWeb.Runtime.WebsocketCleanupFence
   alias CodexPoolerWeb.WebsocketControlPath
 
@@ -22,6 +23,24 @@ defmodule CodexPoolerWeb.Runtime.WebsocketCleanupFenceTest do
     assert :ok = WebsocketCleanupFence.await_listener_socket_cleanup!(current)
   end
 
+  test "the cleanup checkpoint does not require the listener socket to exit" do
+    :ok = WebsocketCleanupFence.install!(server: self())
+    socket = start_fence_socket!()
+    monitor = Process.monitor(socket)
+    send(socket, :finish_held)
+    assert_receive {:cleanup_marked, ^socket}
+    assert :ok = WebsocketCleanupFence.await_listener_socket_cleanup!(socket)
+    assert Process.alive?(socket)
+
+    assert_raise ExUnit.AssertionError, ~r/listener socket did not exit/, fn ->
+      WebsocketCleanupFence.await_listener_socket_teardown!(socket, 0)
+    end
+
+    send(socket, :stop)
+    assert_receive {:DOWN, ^monitor, :process, ^socket, :normal}
+    assert :ok = WebsocketCleanupFence.await_listener_socket_teardown!(socket)
+  end
+
   defp start_fence_socket! do
     before = WebsocketCleanupFence.listener_sockets()
     parent = self()
@@ -31,14 +50,36 @@ defmodule CodexPoolerWeb.Runtime.WebsocketCleanupFenceTest do
         Process.put(:"$ancestors", [parent])
         :telemetry.execute([:bandit, :websocket, :start], %{}, %{})
 
-        receive do
-          :finish -> :telemetry.execute([:codex_pooler, :gateway, :websocket_control, :cleanup_finished], %{}, %{caller: self()})
-        end
+        fence_socket_loop(parent)
       end)
 
     on_exit(fn -> Process.exit(socket, :kill) end)
     assert WebsocketCleanupFence.await_new_listener_socket!(before) == socket
     socket
+  end
+
+  defp fence_socket_loop(parent) do
+    receive do
+      :finish ->
+        :telemetry.execute([:codex_pooler, :gateway, :websocket_control, :cleanup_finished], %{}, %{caller: self()})
+
+      :finish_held ->
+        :telemetry.execute([:codex_pooler, :gateway, :websocket_control, :cleanup_finished], %{}, %{caller: self()})
+        send(parent, {:cleanup_marked, self()})
+        fence_socket_loop(parent)
+
+      :stop ->
+        :ok
+
+      {:publish_receipt, ref, receipt} ->
+        result = DeliveryReceiptHandoff.publish(receipt.token, receipt.identity, receipt.receipt, {:response_task, receipt.actor, receipt.activity, :completed})
+        send(parent, {ref, result})
+        fence_socket_loop(parent)
+
+      message ->
+        send(parent, message)
+        fence_socket_loop(parent)
+    end
   end
 
   @slow_handler :websocket_cleanup_fence_test_slow_config
@@ -134,6 +175,53 @@ defmodule CodexPoolerWeb.Runtime.WebsocketCleanupFenceTest do
   describe "registered receipt ownership" do
     setup tags do
       CodexPooler.DataCase.setup_sandbox(tags)
+    end
+
+    test "listener teardown waits beyond its cleanup checkpoint for fallback receipt SQL without draining another socket", %{sandbox_owner: owner} do
+      alias CodexPooler.Gateway.Transports.Websocket.ActivityRegistry
+      alias CodexPooler.Repo
+
+      :ok = WebsocketCleanupFence.install!(server: self())
+      socket = start_fence_socket!()
+      foreign_socket = start_fence_socket!()
+      owned = start_owned_receipt!(owner, socket)
+      foreign = start_owned_receipt!(owner, foreign_socket)
+      Process.exit(owned.actor, :kill)
+      assert_receive {:DOWN, ref, :process, actor, :killed}
+      assert ref == owned.monitor and actor == owned.actor
+      handler = {__MODULE__, make_ref()}
+      on_exit(fn -> :telemetry.detach(handler) end)
+      :ok = :telemetry.attach(handler, [:codex_pooler, :repo, :query], &__MODULE__.hold_receipt_query/4, %{actor: :registered, token: owned.token, parent: self(), tag: handler})
+      publish_from_socket!(socket, owned)
+      assert_receive {^handler, :sql_held, fallback}, 5_000
+      fallback_monitor = Process.monitor(fallback)
+      on_exit(fn -> send(fallback, {handler, :release}) end)
+      socket_monitor = Process.monitor(socket)
+      send(socket, :finish)
+      assert_receive {:DOWN, ^socket_monitor, :process, ^socket, :normal}, 5_000
+      assert %{actor: ^fallback, fallback?: true, finished?: false} = :sys.get_state(ActivityRegistry).delivery_receipts[owned.token]
+
+      try do
+        assert :ok = WebsocketCleanupFence.await_listener_socket_cleanup!(socket, 100)
+
+        assert_raise ExUnit.AssertionError, ~r/receipt.*still running/, fn ->
+          WebsocketCleanupFence.await_listener_socket_teardown!(socket, 100)
+        end
+      after
+        send(fallback, {handler, :release})
+        assert_receive {:DOWN, ^fallback_monitor, :process, ^fallback, :normal}, 5_000
+        :telemetry.detach(handler)
+      end
+
+      assert :ok = WebsocketCleanupFence.await_listener_socket_teardown!(socket, 100)
+      assert Repo.get!(CodexPooler.Accounting.Attempt, owned.identity.attempt_id).response_metadata["downstream_delivery"] == owned.receipt
+      assert %{finished?: false} = :sys.get_state(ActivityRegistry).delivery_receipts[foreign.token]
+      assert Process.alive?(foreign.actor)
+      publish_from_socket!(foreign_socket, foreign)
+      assert_receive {:DOWN, foreign_ref, :process, foreign_actor, :normal}, 5_000
+      assert foreign_ref == foreign.monitor and foreign_actor == foreign.actor
+      send(foreign_socket, :finish)
+      assert :ok = WebsocketCleanupFence.await_listener_socket_teardown!(foreign_socket)
     end
 
     test "sandbox fence includes active local owner failure settlement before a receipt", %{sandbox_owner: owner} do
@@ -312,6 +400,12 @@ defmodule CodexPoolerWeb.Runtime.WebsocketCleanupFenceTest do
     end
   end
 
+  defp publish_from_socket!(socket, receipt) do
+    ref = make_ref()
+    send(socket, {:publish_receipt, ref, receipt})
+    assert_receive {^ref, :ok}, 5_000
+  end
+
   def hold_failure_notify(_, _, %{query: "SELECT pg_notify($1, $2)"}, %{actor: actor, parent: parent, tag: tag}) when self() == actor do
     send(parent, {tag, :held})
 
@@ -324,7 +418,7 @@ defmodule CodexPoolerWeb.Runtime.WebsocketCleanupFenceTest do
 
   def hold_failure_notify(_, _, _, _), do: :ok
 
-  defp start_owned_receipt!(owner) do
+  defp start_owned_receipt!(owner, socket \\ self()) do
     alias CodexPooler.Gateway.Websocket.{DeliveryReceipt, DeliveryReceiptHandoff, ResponseTask}
     alias Ecto.Adapters.SQL.Sandbox
     parent = self()
@@ -342,7 +436,7 @@ defmodule CodexPoolerWeb.Runtime.WebsocketCleanupFenceTest do
           {:ok, reserved} = CodexPooler.Accounting.reserve(setup.auth, setup.model, %{"model" => setup.model.exposed_model_id, "input" => []}, %{endpoint: "/backend-api/codex/responses", transport: "websocket", correlation_id: Ecto.UUID.generate()})
           {:ok, attempt} = CodexPooler.Accounting.create_attempt(reserved.request, setup.assignment)
           identity = %{request_id: reserved.request.id, attempt_id: attempt.id, replay_generation: 0}
-          {:ok, _} = DeliveryReceiptHandoff.enroll(parent, identity)
+          {:ok, _} = DeliveryReceiptHandoff.enroll(socket, identity)
           send(parent, {:receipt_identity, self(), identity})
           :ok
         end,

@@ -244,11 +244,11 @@ defmodule CodexPoolerWeb.Runtime.WebsocketCleanupFence do
     {result, log} =
       case Agent.get(fence, & &1.holder) do
         nil ->
-          ExUnit.CaptureLog.with_log([level: :info], fn -> await(fence, deadline) end)
+          ExUnit.CaptureLog.with_log([level: :info], fn -> await_result(fence, deadline) end)
 
         holder ->
           :capturing = holder_call(holder, :start_teardown)
-          result = await(fence, deadline)
+          result = await_result(fence, deadline)
           {result, holder_call(holder, :collect)}
       end
 
@@ -257,9 +257,18 @@ defmodule CodexPoolerWeb.Runtime.WebsocketCleanupFence do
     pass_through_unexpected(log)
 
     case result do
-      :ok -> :ok
-      {:unfinished, count} -> flunk("#{count} deferred websocket termination cleanup(s) did not finish within #{@budget_ms} ms")
+      {:ok, :ok} -> :ok
+      {:ok, {:unfinished, count}} -> flunk("#{count} deferred websocket termination cleanup(s) did not finish within #{@budget_ms} ms")
+      {:raised, kind, reason, stack} -> :erlang.raise(kind, reason, stack)
     end
+  end
+
+  # Keep the holder/handler release above unconditional when a receipt fence
+  # raises, so a failed cleanup cannot strand the next test's log capture.
+  defp await_result(fence, deadline) do
+    {:ok, await(fence, deadline)}
+  catch
+    kind, reason -> {:raised, kind, reason, __STACKTRACE__}
   end
 
   defp await(fence, deadline) do
@@ -269,6 +278,7 @@ defmodule CodexPoolerWeb.Runtime.WebsocketCleanupFence do
 
     cond do
       live_sockets == [] and MapSet.size(unfinished) == 0 ->
+        Enum.each(state.sockets, &await_receipts({:socket, &1}, [], [], deadline, @budget_ms))
         :ok
 
       System.monotonic_time(:millisecond) >= deadline ->
@@ -364,12 +374,30 @@ defmodule CodexPoolerWeb.Runtime.WebsocketCleanupFence do
     end
   end
 
-  @doc "Waits for the exact listener socket's cleanup; another socket cannot satisfy this barrier."
+  @doc "Waits for the exact listener socket's cleanup marker, without joining a still-held socket or receipt writer."
   @spec await_listener_socket_cleanup!(pid(), non_neg_integer()) :: :ok
   def await_listener_socket_cleanup!(socket, timeout \\ @budget_ms) when is_pid(socket) and is_integer(timeout) and timeout >= 0 do
     fence = installed_fence!()
     unless MapSet.member?(Agent.get(fence, & &1.sockets), socket), do: flunk("socket does not belong to this listener fence")
     await_listener_socket_cleanup(fence, socket, System.monotonic_time(:millisecond) + timeout)
+  end
+
+  @doc "Waits for the exact listener socket's cleanup, actual exit and registered receipt writers before fixture disposal."
+  @spec await_listener_socket_teardown!(pid(), non_neg_integer()) :: :ok
+  def await_listener_socket_teardown!(socket, timeout \\ @budget_ms) when is_pid(socket) and is_integer(timeout) and timeout >= 0 do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    await_listener_socket_cleanup!(socket, timeout)
+    monitor = Process.monitor(socket)
+
+    receive do
+      {:DOWN, ^monitor, :process, ^socket, _reason} -> :ok
+    after
+      max(deadline - System.monotonic_time(:millisecond), 0) ->
+        Process.demonitor(monitor, [:flush])
+        flunk("listener socket did not exit before cleanup")
+    end
+
+    await_receipts({:socket, socket}, [], [], deadline, timeout)
   end
 
   defp await_listener_socket_cleanup(fence, socket, deadline) do
@@ -436,29 +464,36 @@ defmodule CodexPoolerWeb.Runtime.WebsocketCleanupFence do
   def await_sandbox_cleanups!(owner, timeout \\ @budget_ms) when is_pid(owner) and is_integer(timeout) and timeout >= 0 do
     deadline = System.monotonic_time(:millisecond) + timeout
     await_session_cleanups!(timeout)
-    await_receipts(owner, [], [], deadline, timeout)
+    await_receipts({:sandbox, owner}, [], [], deadline, timeout)
+  end
+
+  @doc "Waits for one socket's registered receipt writers after its producers have stopped; absent entries prove quiescence, not delivery success."
+  @spec await_socket_receipts!(pid(), non_neg_integer()) :: :ok
+  def await_socket_receipts!(socket, timeout \\ @budget_ms) when is_pid(socket) and is_integer(timeout) and timeout >= 0 do
+    await_receipts({:socket, socket}, [], [], System.monotonic_time(:millisecond) + timeout, timeout)
   end
 
   # Carry semantic identities across polls; keep the opaque set representation
   # inside each poll behind MapSet's public conversions.
-  @spec await_receipts(pid(), [reference()], [pid()], integer(), non_neg_integer()) :: :ok
-  defp await_receipts(owner, tokens, actors, deadline, timeout) do
+  @spec await_receipts({:sandbox | :socket, pid()}, [reference()], [pid()], integer(), non_neg_integer()) :: :ok
+  defp await_receipts(scope, tokens, actors, deadline, timeout) do
     # Test-only, read-only snapshots: receipt_cohort/0 would close the producer
     # barrier. Sensitive ResponseTasks cannot be classified by their dictionary.
     %{delivery_receipts: receipts, activities: activities} = cleanup_snapshot!(CodexPooler.Gateway.Transports.Websocket.ActivityRegistry, deadline)
-    {checkouts, mode} = sandbox_ownership_snapshot!(deadline)
+    ownership = receipt_ownership(scope, deadline)
 
     tokens =
       Enum.reduce(receipts, MapSet.new(tokens), fn {token, entry}, selected ->
-        if receipt_owner(entry, checkouts, mode) == owner, do: MapSet.put(selected, token), else: selected
+        if receipt_in_scope?(entry, scope, ownership), do: MapSet.put(selected, token), else: selected
       end)
 
     selected = Map.take(receipts, MapSet.to_list(tokens))
+    verify_socket_receipt_results!(scope, selected)
     actors = Enum.reduce(selected, MapSet.new(actors), fn {_token, entry}, seen -> if is_pid(entry.actor), do: MapSet.put(seen, entry.actor), else: seen end)
 
     # A local-owner failure settles before it creates any delivery receipt.
     # Keep the actor until DOWN even if it unregisters its activity meanwhile.
-    actors = include_local_owner_actors(actors, activities, owner, checkouts, mode)
+    actors = include_local_owner_actors(actors, activities, scope, ownership)
 
     # Native receipt actors can be long-lived owners. Their acknowledged SQL
     # completion releases the obligation without requiring that owner to exit.
@@ -472,7 +507,7 @@ defmodule CodexPoolerWeb.Runtime.WebsocketCleanupFence do
         :ok
 
       System.monotonic_time(:millisecond) >= deadline ->
-        flunk("#{pending} receipt obligation(s) and #{length(live)} receipt actor(s) still running #{timeout} ms before the sandbox owner stops")
+        flunk("#{pending} receipt obligation(s) and #{length(live)} receipt actor(s) still running #{timeout} ms before fixture cleanup")
 
       true ->
         # Re-read the same tokens after actor DOWN: the registry may assign a
@@ -481,24 +516,37 @@ defmodule CodexPoolerWeb.Runtime.WebsocketCleanupFence do
         after
           min(@poll_ms, max(deadline - System.monotonic_time(:millisecond), 0)) ->
             if System.monotonic_time(:millisecond) >= deadline do
-              flunk("#{pending} receipt obligation(s) and #{length(live)} receipt actor(s) still running #{timeout} ms before the sandbox owner stops")
+              flunk("#{pending} receipt obligation(s) and #{length(live)} receipt actor(s) still running #{timeout} ms before fixture cleanup")
             else
-              await_receipts(owner, MapSet.to_list(tokens), MapSet.to_list(actors), deadline, timeout)
+              await_receipts(scope, MapSet.to_list(tokens), MapSet.to_list(actors), deadline, timeout)
             end
         end
     end
   end
 
-  defp include_local_owner_actors(actors, activities, owner, checkouts, mode) do
+  defp include_local_owner_actors(actors, activities, scope, ownership) do
     Enum.reduce(activities, actors, fn
       {_token, %{kind: :local_owner, pid: pid} = entry}, seen ->
-        ownership = %{actor: pid, task: pid, socket: Map.get(entry, :direct_parent)}
-        if receipt_owner(ownership, checkouts, mode) == owner, do: MapSet.put(seen, pid), else: seen
+        actor = %{actor: pid, task: pid, socket: Map.get(entry, :direct_parent)}
+        if receipt_in_scope?(actor, scope, ownership), do: MapSet.put(seen, pid), else: seen
 
       _entry, seen ->
         seen
     end)
   end
+
+  defp receipt_in_scope?(entry, {:socket, socket}, _ownership), do: entry.socket == socket
+  defp receipt_in_scope?(entry, {:sandbox, owner}, {checkouts, mode}), do: receipt_owner(entry, checkouts, mode) == owner
+
+  defp receipt_ownership({:sandbox, _owner}, deadline), do: sandbox_ownership_snapshot!(deadline)
+  defp receipt_ownership({:socket, _socket}, _deadline), do: nil
+
+  defp verify_socket_receipt_results!({:socket, _socket}, selected) do
+    if Enum.any?(selected, fn {_token, entry} -> entry.finished? and entry.result != :ok end),
+      do: flunk("fixture socket receipt failed before cleanup")
+  end
+
+  defp verify_socket_receipt_results!({:sandbox, _owner}, _selected), do: :ok
 
   defp sandbox_ownership_snapshot!(deadline) do
     %{pid: manager, opts: opts} = Ecto.Adapter.lookup_meta(CodexPooler.Repo)
