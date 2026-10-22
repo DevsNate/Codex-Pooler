@@ -114,15 +114,19 @@
       "allowedVersions": "<30"
     },
     {
-      "description": "Keep Node runtime image updates together",
-      "matchDatasources": [
-        "docker"
+      "description": "Keep Node runtime updates together across Docker and GitHub Actions",
+      "matchManagers": [
+        "custom.regex",
+        "dockerfile",
+        "github-actions"
       ],
       "matchPackageNames": [
-        "node"
+        "node",
+        "actions/node-versions"
       ],
-      "groupName": "Node runtime image",
-      "groupSlug": "node-runtime-image"
+      "groupName": "Node runtime",
+      "groupSlug": "node-runtime-image",
+      "allowedVersions": ">=26 <27"
     },
     {
       "description": "Keep Helm CLI pins together",
