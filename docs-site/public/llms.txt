@@ -2,7 +2,7 @@
 
 > Codex Pooler is a self-hosted gateway for OpenAI Codex: Pools of Codex accounts behind stable Pool API keys, the Codex backend routes, a narrow OpenAI-compatible /v1 surface, and metadata-only operations. This file indexes its public docs for agents and answer engines.
 
-Last reviewed: 2026-10-17
+Last reviewed: 2026-10-22
 
 Inventory scope: curated primary and discovery pages listed below; this index intentionally excludes other rendered pages.
 
@@ -41,7 +41,6 @@ Pricing and availability: https://www.codex-pooler.com/pricing.md
 - [Operator admin UI](https://www.codex-pooler.com/docs/operators/admin-ui/): Manage Pools, upstream accounts, Pool API keys, request metadata, audit metadata, jobs, and system settings from Codex Pooler.
 - [Alerts and incident signals](https://www.codex-pooler.com/docs/operators/alerts/): Read public-safe Codex Pooler alerts, health states, request metadata, audit metadata, jobs, and system settings signals without exposing content bodies.
 - [Run Codex Pooler with Docker Compose](https://www.codex-pooler.com/docs/deployment/docker-compose/): Run Codex Pooler with Docker Compose for a small self-hosted install.
-- [Deploy Codex Pooler on Railway](https://www.codex-pooler.com/docs/deployment/railway/): Deploy Codex Pooler on Railway with persistent PostgreSQL, private secrets, automatic migrations, and a public HTTPS endpoint.
 - [Deploy Codex Pooler on Kubernetes with Helm](https://www.codex-pooler.com/docs/deployment/helm/): Deploy Codex Pooler to Kubernetes from the iCoreTech Helm repository.
 - [Monitoring](https://www.codex-pooler.com/docs/monitoring/overview/): Set up metrics, import the Grafana dashboard, and choose the right evidence when investigating Codex Pooler.
 - [Metrics setup](https://www.codex-pooler.com/docs/monitoring/metrics/): Secure and collect Codex Pooler Prometheus metrics, including Helm ServiceMonitor settings and coverage across release roles.

@@ -141,8 +141,8 @@ assigned Pools.
   keys or conversation IDs when a harness does not send them directly
 - 🧱 **Choose who can connect:** optionally allow requests only from approved
   networks
-- 🐳 **Run it on your own infrastructure:** use Docker Compose, deploy in your
-  Railway account, or run on Kubernetes as your needs grow
+- 🐳 **Run it on your own infrastructure:** start with Docker Compose or deploy
+  on Kubernetes as your needs grow
 
 ## Harness Configuration
 
@@ -1306,13 +1306,6 @@ Use a model available to your Pool.
 
 This runs the published release image with a local Postgres database. It is the
 fastest way to try Codex Pooler on a laptop or small server.
-
-No server? Deploy in your own Railway account with persistent Postgres and automatic migrations already configured.
-
-[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/codex-pooler-1?referralCode=ftyt7p&utm_medium=integration&utm_source=template&utm_campaign=generic)
-
-[Railway setup guide](https://www.codex-pooler.com/docs/deployment/railway/). Railway hosting is billed separately.
-
 For normal use, run a versioned, tagged stable release from [GitHub Releases](https://github.com/icoretech/codex-pooler/releases). The `latest` image tag follows the most recently published release, but a version tag keeps the installation reproducible; run from source only in [Local Development](#local-development).
 
 Prerequisites:
@@ -1532,7 +1525,6 @@ Choose the deployment path that matches how you want to operate Codex Pooler:
 | Path | Use it for | Start here |
 | --- | --- | --- |
 | Docker Compose | A quick self-hosted install on a laptop, lab server, or small single node | [Docker Compose deployment guide](https://www.codex-pooler.com/docs/deployment/docker-compose/) |
-| Railway | A public instance in your own Railway account, with persistent Postgres and automatic migrations | [One-click deploy](https://railway.com/deploy/codex-pooler-1?referralCode=ftyt7p&utm_medium=integration&utm_source=template&utm_campaign=generic) · [Guide](https://www.codex-pooler.com/docs/deployment/railway/) |
 | Kubernetes | Production installs, managed ingress, external Postgres, metrics, and separate runtime roles | [Helm deployment guide](https://www.codex-pooler.com/docs/deployment/helm/) |
 
 The Kubernetes path uses the

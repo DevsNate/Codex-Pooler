@@ -4,7 +4,7 @@ import { LICENSE_URL, docs } from "../data/site";
 const faqs = [
   {
     q: "Is Codex Pooler a hosted service?",
-    a: "No. You run it on your own machine, server or cluster, or in your Railway account. There's no hosted version and no account to create with us.",
+    a: "No. You run it on your own machine, server or cluster. There's no hosted version and no account to create with us.",
   },
   {
     q: "Does it let me go past Codex limits?",
@@ -32,11 +32,11 @@ const faqs = [
   },
   {
     q: "What do I need to run it?",
-    a: `<a href="${docs("/deployment/docker-compose/")}">Docker Compose</a> runs the app and database on your machine. <a href="${docs("/deployment/railway/")}">Railway</a> runs them in your account without a server to manage. The <a href="${docs("/deployment/helm/")}">Helm chart</a> runs separate web, worker and scheduler roles on Kubernetes.`,
+    a: `Docker with Compose is enough to start, and the database comes included. For production there's a Helm chart for Kubernetes with separate web, worker and scheduler roles. <a href="${docs("/deployment/docker-compose/")}">Deployment guides</a>.`,
   },
   {
     q: "How much does it cost?",
-    a: `Codex Pooler is free to self-host; you pay for your infrastructure, including Railway hosting. The source is available under the <a href="${LICENSE_URL}">Elastic License 2.0</a>, which lets you run, modify and self-host it, but not offer it to others as a managed service.`,
+    a: `Nothing. It's free to self-host. The source is available under the <a href="${LICENSE_URL}">Elastic License 2.0</a>, which lets you run, modify and self-host it, but not offer it to others as a managed service.`,
   },
   {
     q: "Is it made by OpenAI?",

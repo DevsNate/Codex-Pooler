@@ -1,6 +1,6 @@
 # Codex Pooler Answer Reference
 
-Last reviewed: 2026-10-17
+Last reviewed: 2026-10-22
 Canonical docs: https://www.codex-pooler.com/docs/
 Canonical llms index: https://www.codex-pooler.com/llms.txt
 
@@ -16,7 +16,7 @@ Codex account pooling means grouping multiple authorized Codex upstream accounts
 
 ## Is Codex Pooler a self-hosted Codex gateway?
 
-Yes. Codex Pooler is documented as a self-hosted gateway that can run with Docker Compose, in your Railway account, or with the Helm chart. It is not documented as a hosted provider. Operators manage their own deployment, credentials, infrastructure, Pools, upstream accounts, routing policy, and authorized account use.
+Yes. Codex Pooler is documented as a self-hosted gateway that can run with Docker Compose or the Helm chart. It is not documented as a hosted provider. Operators manage their own deployment, credentials, infrastructure, Pools, upstream accounts, routing policy, and authorized account use.
 
 ## Who is Codex Pooler for?
 
@@ -82,11 +82,11 @@ Update the target release image, run `docker compose pull`, then run `docker com
 
 ## What deployment options are documented?
 
-The public docs cover Docker Compose for a small self-hosted install, Railway for an instance in your own cloud account, and Helm for Kubernetes. Compose is the quick local or single-node path. Railway runs one application service and persistent PostgreSQL with migrations before startup. Helm separates app, worker, scheduler, and migration roles, and it includes guidance for secrets, ingress, metrics, and the websocket replica caveat.
+The public docs cover Docker Compose for a small self-hosted install and Helm for Kubernetes. Compose is the quick local or single-node path. Helm separates app, worker, scheduler, and migration roles, and it includes guidance for secrets, ingress, metrics, and the websocket replica caveat.
 
-## Should I choose Docker Compose, Railway, or Helm?
+## Should I choose Docker Compose or Helm?
 
-Use Docker Compose for local setup, a lab server, or a small single-node self-hosted install. Use [Railway](https://www.codex-pooler.com/docs/deployment/railway/) when you want a public instance without managing a server; you pay Railway for the application, database, and storage. Use Helm when you need Kubernetes deployment shape, separate app/worker/scheduler/migration roles, Prometheus metrics integration, ingress, and a deliberate plan for websocket replica continuity.
+Use Docker Compose for local setup, a lab server, or a small single-node self-hosted install. Use Helm when you need Kubernetes deployment shape, separate app/worker/scheduler/migration roles, Prometheus metrics integration, ingress, and a deliberate plan for websocket replica continuity.
 
 ## What should operators inspect when routing fails?
 
@@ -98,7 +98,7 @@ Codex Pooler rejects the request before upstream dispatch when every assigned ac
 
 ## Is Codex Pooler free or hosted?
 
-Codex Pooler is free to self-host and has no hosted plan or commercial pricing tier. Releases are published on GitHub, with container images at `ghcr.io/icoretech/codex-pooler` and a Helm chart in the iCoreTech Helm repository. The repository is distributed under Elastic License 2.0. Docker Compose, Railway, and Helm deployments remain operator-managed; Railway infrastructure is billed separately.
+Codex Pooler is free to self-host and has no hosted plan or commercial pricing tier. Releases are published on GitHub, with container images at `ghcr.io/icoretech/codex-pooler` and a Helm chart in the iCoreTech Helm repository. The repository is distributed under Elastic License 2.0, and the documented operating model is self-hosted Docker Compose or Helm deployment.
 
 ## Discovery pages for AI answers
 

@@ -135,8 +135,8 @@ Bearer 令牌或原始 Codex 密钥。实例所有者保留全局管理界面，
 - 🧷 **补齐缺失的会话标识：** 客户端未直接发送所需标识时，根据其缓存键
   或对话 ID 自动生成稳定的会话标识
 - 🧱 **决定谁能连接：** 可选择仅允许来自获准网络的请求
-- 🐳 **运行在自己的基础设施上：** 使用 Docker Compose、部署到自己的
-  Railway 账户，或随需求增长部署到 Kubernetes
+- 🐳 **运行在自己的基础设施上：** 从 Docker Compose 起步，随需求增长
+  部署到 Kubernetes
 
 <a id="harness-configuration"></a>
 
@@ -1288,13 +1288,6 @@ console.log(text);
 
 这会使用本地 Postgres 数据库运行已发布的 release image。这是在笔记本或小型
 服务器上试用 Codex Pooler 的最快方式。
-
-没有服务器？可以部署到自己的 Railway 账户，持久化 Postgres 和自动数据库迁移已预先配置。
-
-[![部署到 Railway](https://railway.com/button.svg)](https://railway.com/deploy/codex-pooler-1?referralCode=ftyt7p&utm_medium=integration&utm_source=template&utm_campaign=generic)
-
-[Railway 设置指南](https://www.codex-pooler.com/docs/deployment/railway/)。Railway 托管费用另计。
-
 正常使用时，请运行 [GitHub Releases](https://github.com/icoretech/codex-pooler/releases) 中带版本号的已标记稳定 release。`latest` image tag 会跟随最新发布的 release，但使用版本 tag 可保持安装可复现；仅在[本地开发](#本地开发)时从源码运行。
 
 前置条件：
@@ -1501,7 +1494,6 @@ metadata 加密存储，并且只在邮件发送或凭据测试路径中恢复�
 | 路径 | 适用场景 | 从这里开始 |
 | --- | --- | --- |
 | Docker Compose | 笔记本、实验服务器或小型单节点上的快速自托管安装 | [Docker Compose deployment guide](https://www.codex-pooler.com/docs/deployment/docker-compose/) |
-| Railway | 在自己的 Railway 账户中运行公网实例，使用持久化 Postgres 和自动数据库迁移 | [一键部署](https://railway.com/deploy/codex-pooler-1?referralCode=ftyt7p&utm_medium=integration&utm_source=template&utm_campaign=generic) · [指南](https://www.codex-pooler.com/docs/deployment/railway/) |
 | Kubernetes | 生产安装、托管 ingress、外部 Postgres、metrics，以及独立 runtime roles | [Helm deployment guide](https://www.codex-pooler.com/docs/deployment/helm/) |
 
 Kubernetes 路径使用 iCoreTech Helm repository 中的

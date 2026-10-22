@@ -113,7 +113,7 @@ Codex Pooler は、固定の Pool API キーを使って Codex 互換のエー�
 - 🔎 **モデルのダウングレードを検出：** プロバイダーがリクエスト時とは異なるモデルを返した場合や、応答中にモデル名を変更した場合に確認できます
 - 🧷 **不足している継続性の情報を補完：** クライアントがセッション識別情報を直接送信しない場合、キャッシュキーや会話 ID から安定した識別情報を導出します
 - 🧱 **接続元を選択：** 必要に応じて、許可したネットワークからのリクエストだけを受け付けられます
-- 🐳 **自分のインフラで運用：** Docker Compose、自分の Railway アカウント、または規模に応じて Kubernetes を利用できます
+- 🐳 **自分のインフラで運用：** Docker Compose で始め、規模に応じて Kubernetes にデプロイできます
 
 <a id="harness-configuration"></a>
 
@@ -1233,13 +1233,6 @@ Pool で利用可能なモデルを使用してください。
 ## Docker Compose でクイックスタート
 
 公開済みのリリースイメージを、ローカルの Postgres データベースとともに実行します。ノート PC や小規模サーバーで Codex Pooler を試す最も手軽な方法です。
-
-サーバーがない場合は、自分の Railway アカウントにデプロイできます。永続化された Postgres と自動マイグレーションは設定済みです。
-
-[![Railway にデプロイ](https://railway.com/button.svg)](https://railway.com/deploy/codex-pooler-1?referralCode=ftyt7p&utm_medium=integration&utm_source=template&utm_campaign=generic)
-
-[Railway セットアップガイド](https://www.codex-pooler.com/docs/deployment/railway/)。Railway のホスティング料金は別途かかります。
-
 通常の利用には、[GitHub Releases](https://github.com/icoretech/codex-pooler/releases) のバージョンタグ付き安定版を使用してください。イメージタグ `latest` は直近の公開リリースを追従しますが、バージョンタグを指定すれば同じ構成を再現できます。ソースからの実行は[ローカル開発](#local-development)でのみ行ってください。
 
 前提条件：
@@ -1393,7 +1386,6 @@ Codex Pooler の運用方法に合ったデプロイ方法を選んでくださ�
 | 方法 | 用途 | ガイド |
 | --- | --- | --- |
 | Docker Compose | ノート PC、検証用サーバー、小規模な単一ノードへの手軽なセルフホスト導入 | [Docker Compose デプロイガイド](https://www.codex-pooler.com/docs/deployment/docker-compose/) |
-| Railway | 自分の Railway アカウントで公開インスタンスを運用し、永続化された Postgres と自動マイグレーションを利用 | [ワンクリックデプロイ](https://railway.com/deploy/codex-pooler-1?referralCode=ftyt7p&utm_medium=integration&utm_source=template&utm_campaign=generic) · [ガイド](https://www.codex-pooler.com/docs/deployment/railway/) |
 | Kubernetes | 本番環境、管理された Ingress、外部 Postgres、メトリクス、ランタイムロールの分離 | [Helm デプロイガイド](https://www.codex-pooler.com/docs/deployment/helm/) |
 
 Kubernetes へのデプロイには、iCoreTech Helm リポジトリの [`icoretech/codex-pooler` チャート](https://github.com/icoretech/helm/tree/main/charts/codex-pooler)を使用します。このチャートは 1 つのリリースイメージを、ウェブ、ワーカー、スケジューラー、マイグレーションの独立したロールとして実行します。実際の導入では、チャートの `--version` を固定してください。チャートはデフォルトで、対応する `appVersion` を `image.tag` に使用します。
