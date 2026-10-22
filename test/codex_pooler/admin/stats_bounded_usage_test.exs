@@ -147,6 +147,7 @@ defmodule CodexPooler.Admin.StatsBoundedUsageTest do
     assert dashboard.kpis.tokens_per_second.value == expected_speed
     assert dashboard.sources.attempts == Enum.sum_by(entries, &length(&1.attempts))
     assert dashboard.sources.settlements == length(entries)
+    assert Enum.sum_by(dashboard.charts.requests, & &1.requests) == length(entries)
     assert Enum.sum_by(dashboard.charts.tokens, & &1.total_tokens) == tokens.total_tokens
     assert Enum.sum_by(dashboard.charts.settled_cost, & &1.settled_cost_micros) == cost
     assert Enum.any?(dashboard.tables.upstreams, &(&1.requests == 0)) == hd(seed.pools).id in pool_ids
@@ -182,9 +183,17 @@ defmodule CodexPooler.Admin.StatsBoundedUsageTest do
 
   defp assert_series!(charts, entries, window) do
     groups = Enum.group_by(entries, &bucket_label(&1.ledger.occurred_at, window))
-    assert length(charts.requests) == %{"1h" => 2, "5h" => 6, "24h" => 25, "7d" => 8}[window]
+    request_groups = Enum.group_by(entries, &bucket_label(&1.request.admitted_at, window))
+    assert length(charts.requests) == %{"1h" => 13, "5h" => 6, "24h" => 25, "7d" => 8}[window]
     assert length(charts.tokens) == length(charts.requests)
     assert length(charts.settled_cost) == length(charts.requests)
+
+    if window == "1h" do
+      labels = Enum.map(~w(22:45 22:50 22:55 23:00 23:05 23:10 23:15 23:20 23:25 23:30 23:35 23:40 23:45), &("2026-03-29T" <> &1 <> ":00Z"))
+      for series <- [charts.requests, charts.tokens, charts.settled_cost], do: assert(Enum.map(series, & &1.bucket) == labels)
+    end
+
+    for row <- charts.requests, do: assert(row.requests == length(Map.get(request_groups, row.bucket, [])))
 
     for row <- charts.tokens do
       known = groups |> Map.get(row.bucket, []) |> Enum.filter(& &1.known?)
@@ -193,6 +202,12 @@ defmodule CodexPooler.Admin.StatsBoundedUsageTest do
     end
 
     for row <- charts.settled_cost, do: assert(row.settled_cost_micros == totals(Map.get(groups, row.bucket, [])).settled_cost_micros)
+  end
+
+  defp bucket_label(timestamp, "1h") do
+    timestamp = DateTime.shift_zone!(timestamp, "Etc/UTC")
+    minute = timestamp.minute - rem(timestamp.minute, 5)
+    Calendar.strftime(%{timestamp | minute: minute}, "%Y-%m-%dT%H:%M:00Z")
   end
 
   defp bucket_label(timestamp, "7d"), do: timestamp |> DateTime.to_date() |> Date.to_iso8601()
