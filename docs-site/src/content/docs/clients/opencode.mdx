@@ -162,6 +162,8 @@ $env:CODEX_POOLER_API_KEY = "<pool-api-key>"
 
 Define only model ids your assigned Pool can serve. If you run Codex Pooler locally, set `baseURL` to `http://localhost:4000/v1`.
 
+Provider-level `options.baseURL` takes precedence over model endpoints inherited from OpenCode's catalog, routing this provider's models through Codex Pooler. Keep the connection URL in provider `options`; model-level `options.baseURL` does not override it in this OpenAI setup.
+
 ## Choose a model
 
 Select an `openai/` model configured below the `openai` provider and available to your Pool.

@@ -102,6 +102,8 @@ Merge this native v2 configuration into `opencode.jsonc` at the path for your sy
 
 For a local instance, use `http://localhost:4000/v1`. Define only models your Pool serves, and replace the example limits with the values described below. Keep the title agent on an available model so helper calls do not select an unavailable default.
 
+Keep the custom `codex-pooler` provider and explicit model definitions above. A model's `settings.baseURL` overrides the provider's `settings.baseURL`; omit model-level URLs to use the shared Pooler connection. When reusing an existing catalog provider, inherited model endpoints can take precedence over its provider URL. Confirm the destination in Codex Pooler's request logs.
+
 ## Choose a model
 
 Read the authenticated catalog before copying a context budget:
