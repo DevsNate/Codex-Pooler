@@ -56,6 +56,16 @@ defmodule CodexPooler.Gateway.Metadata.CodexModelDecodeContractTest do
       end
     end
 
+    test "the common decoder preserves permission prefixes added inside its window" do
+      for prefixes <- [nil, "Synthetic {{ approved_prefixes }}", 7, false, %{}] do
+        entry = "sample-permissions-model" |> CodexCatalogShapes.synced_source() |> put_in(["model_messages", "permissions"], %{"approved_prefixes" => prefixes})
+        assert CodexModelDecodeContract.violations(entry) == []
+        assert {:ok, catalog} = build([{model("sample-permissions-model"), entry}], :decode_checked)
+        assert [served] = catalog.body["models"]
+        assert served["model_messages"]["permissions"]["approved_prefixes"] == prefixes
+      end
+    end
+
     test "diagnostics distinguish unknown enum variants from malformed values without retaining content" do
       base = CodexCatalogShapes.synced_source("sample-diagnostic-model")
       assert CodexModelDecodeContract.violation_classes(Map.put(base, "shell_type", "new_provider_variant")) == ["new_enum_variant"]

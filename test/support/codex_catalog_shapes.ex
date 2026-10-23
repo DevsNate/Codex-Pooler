@@ -299,6 +299,7 @@ defmodule CodexPooler.CodexCatalogShapes do
       {"template only", Map.delete(base, "base_instructions"), []},
       {"unknown fields", Map.merge(base, %{"future_flag" => "x", "future_struct" => %{"a" => [1, nil]}}), []},
       {"code mode tool messages", put_in(base, ["model_messages", "tools"], %{"code_mode" => %{"exec" => %{"description" => "Synthetic code mode"}, "wait" => %{"parameters" => "{}"}, "deferred_nested_tools_guidance" => "", "mcp_typescript_preamble" => ""}}), []},
+      {"permission approved prefixes", put_in(base, ["model_messages", "permissions"], %{"approved_prefixes" => "Synthetic {{ approved_prefixes }}"}), []},
       {"custom reasoning effort", Map.put(base, "supported_reasoning_levels", [%{"effort" => "turbo", "description" => "Synthetic"}]), []},
       {"unknown tool_mode and multi_agent_version", Map.merge(base, %{"tool_mode" => "future_mode", "multi_agent_version" => "v9"}), []},
       {"shell_type aliases", Map.put(base, "shell_type", "default"), []},
