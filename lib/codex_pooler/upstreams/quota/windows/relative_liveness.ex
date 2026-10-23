@@ -261,9 +261,21 @@ defmodule CodexPooler.Upstreams.Quota.Windows.RelativeLiveness do
         Evidence.future_observed_skew_seconds()
   end
 
+  @doc """
+  Whether a provider-clock instant is not later than `as_of`, allowing the
+  bounded provider clock skew.
+  """
+  @spec provider_time_nonfuture?(DateTime.t(), DateTime.t()) :: boolean()
+  def provider_time_nonfuture?(%DateTime{} = provider_at, %DateTime{} = as_of) do
+    latest = DateTime.add(as_of, Evidence.provider_clock_skew_seconds(), :second)
+    DateTime.compare(provider_at, latest) != :gt
+  end
+
+  def provider_time_nonfuture?(_provider_at, _as_of), do: false
+
   defp proof_valid_at?(provider_at, timestamp) do
     DateTime.diff(timestamp, provider_at, :second) <= Evidence.freshness_ttl_seconds() and
-      DateTime.compare(provider_at, timestamp) != :gt
+      provider_time_nonfuture?(provider_at, timestamp)
   end
 
   defp parse_datetime(value) when is_binary(value) do

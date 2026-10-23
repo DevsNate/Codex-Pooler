@@ -27,6 +27,22 @@ defmodule CodexPooler.Upstreams.Quota.Windows.EvidenceStoreWeeklyRestartTest do
     identity
   end
 
+  defp allow_provider_clock_skew!(seconds) do
+    previous = Application.get_env(:codex_pooler, Evidence)
+
+    Application.put_env(
+      :codex_pooler,
+      Evidence,
+      Keyword.put(previous || [], :quota_provider_clock_skew_seconds, seconds)
+    )
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:codex_pooler, Evidence, previous),
+        else: Application.delete_env(:codex_pooler, Evidence)
+    end)
+  end
+
   defp exhausted_row!(identity, observed_at, opts \\ []) do
     used_row!(identity, observed_at, "100", opts)
   end
@@ -1570,6 +1586,33 @@ defmodule CodexPooler.Upstreams.Quota.Windows.EvidenceStoreWeeklyRestartTest do
     assert Evidence.current_freshness_state(row, DateTime.add(t0, 16, :minute)) == "fresh"
   end
 
+  test "sliding live zeroes stamped a few seconds ahead of the host clock keep a weekly zero fresh" do
+    allow_provider_clock_skew!(30)
+    t0 = DateTime.utc_now() |> DateTime.add(-20, :minute) |> DateTime.truncate(:microsecond)
+    identity = identity!()
+
+    assert {:ok, _row} =
+             used_row!(identity, t0, "0", reset_at: DateTime.add(t0, @window_seconds, :second))
+
+    for minute <- 1..16 do
+      observed_at = DateTime.add(t0, minute, :minute)
+
+      assert {:ok, _row} =
+               EvidenceStore.record_evidence(
+                 identity,
+                 floating_zero(observed_at,
+                   reset_at: DateTime.add(observed_at, @window_seconds + 6, :second)
+                 ),
+                 observed_at,
+                 observed_at
+               )
+    end
+
+    row = account_row(identity)
+    assert DateTime.diff(row.observed_at, t0, :minute) >= 12
+    assert Evidence.current_freshness_state(row, DateTime.add(t0, 16, :minute)) == "fresh"
+  end
+
   test "sliding live zeroes recover an accepted weekly zero after it becomes stale" do
     t0 = DateTime.utc_now() |> DateTime.add(-30, :minute) |> DateTime.truncate(:microsecond)
     identity = identity!()
@@ -2254,6 +2297,31 @@ defmodule CodexPooler.Upstreams.Quota.Windows.EvidenceStoreWeeklyRestartTest do
     }
 
     assert Evidence.current_freshness_state(future_beyond_skew, timestamp) == "stale"
+  end
+
+  test "a configured provider clock allowance still rejects provider time beyond it" do
+    allow_provider_clock_skew!(30)
+    timestamp = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    for {provider_delta, candidate?} <- [{30, true}, {31, false}, {10 * 60, false}] do
+      # Whole seconds keep the boundary exact: 30s is inside the allowance, 31s is not.
+      identity = identity!()
+      assert {:ok, _row} = used_row!(identity, DateTime.add(timestamp, -30, :minute), "31")
+      provider_at = DateTime.add(timestamp, provider_delta, :second)
+
+      assert {:ok, _row} =
+               EvidenceStore.record_evidence(
+                 identity,
+                 floating_zero(timestamp,
+                   reset_at: DateTime.add(provider_at, @window_seconds, :second)
+                 ),
+                 timestamp,
+                 timestamp
+               )
+
+      assert Map.has_key?(account_row(identity).metadata, "__quota_confirmed_candidate_v1") ==
+               candidate?
+    end
   end
 
   test "a resetless weekly zero cannot crash or clear a partially-used observation" do

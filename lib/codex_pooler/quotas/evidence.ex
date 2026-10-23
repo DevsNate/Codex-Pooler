@@ -66,6 +66,7 @@ defmodule CodexPooler.Quotas.Evidence do
   @resetless_precedence_penalty 20
   @default_freshness_ttl_seconds 15 * 60
   @default_future_observed_skew_seconds 5 * 60
+  @default_provider_clock_skew_seconds 0
 
   @type errors :: %{optional(atom()) => [String.t()]}
   @type persistence_identity_key ::
@@ -187,6 +188,19 @@ defmodule CodexPooler.Quotas.Evidence do
     :codex_pooler
     |> Application.get_env(__MODULE__, [])
     |> Keyword.get(:quota_future_observed_skew_seconds, @default_future_observed_skew_seconds)
+  end
+
+  # Provider-derived observation instants (reset_at minus reset_after_seconds)
+  # are read on the provider's clock. A host clock running a few seconds slow
+  # makes every live observation look slightly future, so provider proof is
+  # never valid. Strict (0) by default; a deployment whose clock cannot be
+  # synchronized may opt into a small bounded allowance, which still keeps a
+  # far-future instant from poisoning the monotonic provider watermark.
+  @spec provider_clock_skew_seconds() :: non_neg_integer()
+  def provider_clock_skew_seconds do
+    :codex_pooler
+    |> Application.get_env(__MODULE__, [])
+    |> Keyword.get(:quota_provider_clock_skew_seconds, @default_provider_clock_skew_seconds)
   end
 
   @spec merge_precedence(String.t() | nil, DateTime.t() | nil, String.t() | nil) ::
