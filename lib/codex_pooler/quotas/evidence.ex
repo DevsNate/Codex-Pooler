@@ -67,6 +67,7 @@ defmodule CodexPooler.Quotas.Evidence do
   @default_freshness_ttl_seconds 15 * 60
   @default_future_observed_skew_seconds 5 * 60
   @default_provider_clock_skew_seconds 0
+  @default_routing_min_remaining_percent 0
 
   @type errors :: %{optional(atom()) => [String.t()]}
   @type persistence_identity_key ::
@@ -201,6 +202,17 @@ defmodule CodexPooler.Quotas.Evidence do
     :codex_pooler
     |> Application.get_env(__MODULE__, [])
     |> Keyword.get(:quota_provider_clock_skew_seconds, @default_provider_clock_skew_seconds)
+  end
+
+  # Remaining percentage below which routing stops sending new turns to an
+  # account's 5h or weekly window. A turn started a point or two short of the
+  # limit can exhaust it mid-stream, and the provider's own usage-limit refusal
+  # then reaches the client. 0 (the default) routes until exactly 100% used.
+  @spec routing_min_remaining_percent() :: number()
+  def routing_min_remaining_percent do
+    :codex_pooler
+    |> Application.get_env(__MODULE__, [])
+    |> Keyword.get(:quota_routing_min_remaining_percent, @default_routing_min_remaining_percent)
   end
 
   @spec merge_precedence(String.t() | nil, DateTime.t() | nil, String.t() | nil) ::

@@ -578,6 +578,46 @@ defmodule CodexPooler.Gateway.Routing.QuotaWindowRoutingTest do
     end
   end
 
+  describe "routing minimum remaining percent" do
+    test "without a configured floor an account routes until its window is fully used" do
+      assert %{eligible?: true} =
+               standard_routing([account_primary_window(used_percent: Decimal.new("99"))])
+    end
+
+    test "a configured floor stops routing account 5h and weekly windows short of the limit" do
+      put_routing_min_remaining_percent(2)
+
+      for {used, eligible?} <- [{"97.9", true}, {"98", false}, {"99.5", false}] do
+        primary = standard_routing([account_primary_window(used_percent: Decimal.new(used))])
+        assert primary.eligible? == eligible?, "primary at #{used}%"
+
+        weekly =
+          standard_routing([
+            account_primary_window(),
+            account_secondary_window(used_percent: Decimal.new(used))
+          ])
+
+        assert weekly.eligible? == eligible?, "weekly at #{used}%"
+      end
+
+      assert %{exclusions: [%{reason_codes: ["exhausted"], window_kind: "primary"}]} =
+               standard_routing([account_primary_window(used_percent: Decimal.new("98"))])
+    end
+
+    test "the floor leaves model-scoped windows to their own limit" do
+      put_routing_min_remaining_percent(2)
+
+      assert %{eligible?: true} =
+               Windows.routing_quota_eligibility_from_windows(
+                 [account_primary_window(), model_window(used_percent: Decimal.new("99"))],
+                 at: @observed_at,
+                 model: "sample-codex-spark",
+                 requested_model: "sample-codex-spark",
+                 upstream_model: "sample-codex-spark-upstream"
+               )
+    end
+  end
+
   describe "routing_quota_eligibility_from_windows/2" do
     test "ordinary models stay eligible when Spark quota evidence is absent" do
       assert %{
@@ -1388,6 +1428,31 @@ defmodule CodexPooler.Gateway.Routing.QuotaWindowRoutingTest do
         attrs
       )
     )
+  end
+
+  defp standard_routing(windows) do
+    Windows.routing_quota_eligibility_from_windows(windows,
+      at: @observed_at,
+      model: "sample-codex-standard",
+      requested_model: "sample-codex-standard",
+      upstream_model: "sample-codex-standard-upstream"
+    )
+  end
+
+  defp put_routing_min_remaining_percent(percent) do
+    previous = Application.get_env(:codex_pooler, Evidence)
+
+    Application.put_env(
+      :codex_pooler,
+      Evidence,
+      Keyword.put(previous || [], :quota_routing_min_remaining_percent, percent)
+    )
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:codex_pooler, Evidence, previous),
+        else: Application.delete_env(:codex_pooler, Evidence)
+    end)
   end
 
   defp monthly_account_primary_window(attrs \\ []) do
