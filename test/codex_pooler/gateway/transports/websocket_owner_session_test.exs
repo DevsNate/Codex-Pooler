@@ -1646,6 +1646,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
              )
 
     submitter = owner_exit_submitter(self(), owner, downstream, :pre_visible)
+    submitter_ref = Process.monitor(submitter)
     assert_receive {:exit_controlled_upstream_send, :pre_visible, ^upstream_pid, 1}
     owner_ref = monitor_owner(owner)
 
@@ -1664,7 +1665,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
     assert await_owner_unavailable(context.codex_session_id) == {:error, :owner_unavailable}
     refute_received {:exit_controlled_upstream_send, :pre_visible, _upstream_pid, 2}
     refute_received {:websocket_owner_frame, "upstream-exit-pre", 1, _duplicate}
-    refute Process.alive?(submitter)
+    assert_receive {:DOWN, ^submitter_ref, :process, ^submitter, :normal}, @detection_timeout_ms
   end
 
   test "post-visible active owner preserves the commit barrier before retiring", context do
@@ -1684,6 +1685,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
              )
 
     submitter = owner_exit_submitter(self(), owner, stable_downstream, :post_visible, true)
+    submitter_ref = Process.monitor(submitter)
 
     assert_receive {:websocket_owner_frame, "upstream-exit-post", 1, ^submitter, {:data, "visible-before-upstream-exit"}}
 
@@ -1715,7 +1717,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
     assert await_owner_unavailable(context.codex_session_id) == {:error, :owner_unavailable}
     refute_received {:exit_controlled_upstream_send, :post_visible, _upstream_pid, 2}
     refute_received {:websocket_owner_frame, "upstream-exit-post", 1, ^submitter, _duplicate}
-    refute Process.alive?(submitter)
+    assert_receive {:DOWN, ^submitter_ref, :process, ^submitter, :normal}, @detection_timeout_ms
   end
 
   @tag :owner_exit_settlement_fix
@@ -3907,6 +3909,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
     pending =
       start_pending_terminal_turn(context, "pending-lease-loss", persistence: persistence)
 
+    submitter_ref = Process.monitor(pending.submitter)
     owner = pending.owner
     cancel_owner_timer(pending.active_turn.terminal_delivery_timer_ref)
     owner_ref = Process.monitor(owner)
@@ -3927,7 +3930,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
     assert_receive {:pending_submitter_outcome, "pending-lease-loss", {:exit, _reason}}
     assert Process.read_timer(pending.active_turn.terminal_delivery_timer_ref) == false
 
-    release_abandoned_terminal_sender(pending)
+    release_abandoned_terminal_sender(pending, submitter_ref)
 
     refute_received {:websocket_owner_frame, "pending-lease-loss", 1, _payload}
     refute_received {:pending_submitter_outcome, "pending-lease-loss", _outcome}
@@ -7602,9 +7605,10 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
     release_controlled(terminal_barrier, pending.controls, :terminal_frames)
   end
 
-  defp release_abandoned_terminal_sender(pending) do
+  defp release_abandoned_terminal_sender(pending, submitter_ref) do
     release_pending_terminal_sender(pending)
-    refute Process.alive?(pending.submitter)
+    submitter = pending.submitter
+    assert_receive {:DOWN, ^submitter_ref, :process, ^submitter, :normal}, @detection_timeout_ms
   end
 
   defp assert_stale_messages_do_not_settle_fresh_turn(context, stale, label) do
