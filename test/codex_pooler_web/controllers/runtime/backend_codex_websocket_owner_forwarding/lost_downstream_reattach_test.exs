@@ -34,8 +34,14 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.LostDownst
     :ok
   end
 
-  @tag slow: "a real socket killed mid-turn, the owner's loss monitor and a second socket's reattach"
-  test "the identical resend of a turn whose socket was killed before any output reattaches to the running generation" do
+  for mode <- ["full", "lite"] do
+    @tag slow: "a real socket killed mid-turn, the owner's loss monitor and a second socket's reattach"
+    test "the identical resend reattaches and settles after its socket closes before the task result in #{mode}" do
+      assert_lost_downstream_reattach(unquote(mode))
+    end
+  end
+
+  defp assert_lost_downstream_reattach(mode) do
     release_ref = make_ref()
 
     upstream =
@@ -47,7 +53,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.LostDownst
       )
 
     setup = gateway_setup(upstream)
-    _revision = set_model_serving_mode!(model_serving_scope(), setup, "lite")
+    _revision = set_model_serving_mode!(model_serving_scope(), setup, mode)
     turn_state = Ecto.UUID.generate()
     raw_payload = CodexPooler.JSON.encode!(native_turn_payload(Ecto.UUID.generate(), setup.model.exposed_model_id))
     port = start_public_endpoint!()
@@ -67,10 +73,26 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.LostDownst
     {conn, websocket, ref} = public_websocket_connect!(port, setup, turn_state)
     {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, raw_payload)
     await_reattached_active_turn!(owner, System.monotonic_time(:millisecond) + @timeout_ms)
-    :ok = FakeUpstream.release_frame(upstream, release_ref)
-    {conn, frame} = receive_terminal!(conn, websocket, ref)
-    _closed = Mint.HTTP.close(conn)
+    # Hold the result producer while the replacement socket receives its terminal
+    # and detaches. The terminal and task result come from different processes.
+    task_pid = :sys.get_state(owner).active_turn.task_pid
+    task_monitor = Process.monitor(task_pid)
+    on_exit(fn -> if Process.alive?(task_pid), do: Process.exit(task_pid, :kill) end)
+    detach_ref = observe_terminal_detach!(owner)
+    true = :erlang.suspend_process(task_pid)
 
+    frame =
+      try do
+        :ok = FakeUpstream.release_frame(upstream, release_ref)
+        {conn, frame} = receive_terminal!(conn, websocket, ref)
+        _closed = Mint.HTTP.close(conn)
+        assert_receive {:terminal_detached, ^detach_ref}, @timeout_ms
+        frame
+      after
+        :erlang.resume_process(task_pid)
+      end
+
+    assert_receive {:DOWN, ^task_monitor, :process, ^task_pid, :normal}, @timeout_ms
     assert frame["type"] == "response.completed"
     assert [%Request{id: request_id, status: "succeeded"}] = await_settled!(setup.pool.id, System.monotonic_time(:millisecond) + @timeout_ms)
     assert [%Attempt{replay_generation: 0, status: "succeeded"}] = Repo.all(from(a in Attempt, where: a.request_id == ^request_id))
@@ -80,6 +102,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.LostDownst
              %{"reservation" => 1, "settlement" => 1, "release" => 1}
 
     assert FakeUpstream.count(upstream) == 1
+    assert %{ordinary_success_result: nil, native_compaction_admission: nil} = :sys.get_state(owner)
   end
 
   defp await_lost_active_turn!(owner, deadline_ms) do
@@ -106,6 +129,33 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.LostDownst
           do: flunk("the identical resend never reattached to the running generation"),
           else: Process.sleep(10) && await_reattached_active_turn!(owner, deadline_ms)
     end
+  end
+
+  defp observe_terminal_detach!(owner) do
+    test = self()
+    ref = make_ref()
+
+    hook = fn notified?, event, _name ->
+      case event do
+        {:out, :ok, _from, %{downstream: nil, active_turn: %{downstream: nil, terminal_forwarded?: true}}} when not notified? ->
+          send(test, {:terminal_detached, ref})
+          true
+
+        _other ->
+          notified?
+      end
+    end
+
+    on_exit(fn ->
+      try do
+        :sys.remove(owner, hook)
+      catch
+        :exit, _owner_stopped -> :ok
+      end
+    end)
+
+    :ok = :sys.install(owner, {hook, false})
+    ref
   end
 
   defp receive_terminal!(conn, websocket, ref) do

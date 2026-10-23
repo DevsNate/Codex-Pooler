@@ -4438,7 +4438,9 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
          {:ok, %{ordinary_success_result: %OrdinarySuccessResult{} = receipt} = result},
          %{active_turn: active} = state
        ) do
-    if receipt.owner == state.upstream_pid and
+    # A downstream can detach after receiving its terminal but before this
+    # result arrives. Its socket-bound admission was cleared by the detach.
+    if is_map(active.downstream) and receipt.owner == state.upstream_pid and
          {receipt.request_id, receipt.attempt_id} == active.ordinary_request_identity do
       topology =
         WebsocketOwnerAdmissionControlV1.forwarded_topology(
