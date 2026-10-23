@@ -132,7 +132,7 @@ defmodule CodexPooler.Upstreams.Quota.Windows.CycleConfirmation do
          {:ok, confirmed_at} <- parse_datetime(marker["confirmed_at"]),
          true <- Evidence.current_freshness_state(window, as_of) == "fresh",
          true <- nonfuture?(window.observed_at, as_of),
-         true <- nonfuture?(provider_observed_at, as_of),
+         true <- RelativeLiveness.provider_time_nonfuture?(provider_observed_at, as_of),
          true <- nonfuture?(confirmed_at, as_of),
          true <- provider_fresh?(provider_observed_at, as_of) do
       true
