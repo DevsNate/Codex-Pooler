@@ -69,7 +69,7 @@ defmodule CodexPooler.DeletionCompletionTest do
     assert Deletion.states([pool.id]) == %{pool.id => :in_progress}
     :telemetry.detach(capture)
     assert_receive {:state_query, sql, params}
-    assert state_lookup_plan(sql, params) =~ "oban_jobs_args_index"
+    assert Enum.any?(state_lookup_plan(sql, params), &(&1["Index Name"] == "oban_jobs_args_index"))
 
     %{api_key: key} = active_api_key_fixture(pool_fixture(), %{scope: scope})
     assert {:deleting, _} = KeyDeletion.schedule(scope, key)
@@ -77,7 +77,7 @@ defmodule CodexPooler.DeletionCompletionTest do
     assert KeyDeletion.states([key.id]) == %{key.id => :in_progress}
     :telemetry.detach(capture)
     assert_receive {:state_query, sql, params}
-    assert state_lookup_plan(sql, params) =~ "oban_jobs_args_index"
+    assert Enum.any?(state_lookup_plan(sql, params), &(&1["Index Name"] == "oban_jobs_args_index"))
   end
 
   # Plans the captured lookup with sequential scans priced out, as the other plan
@@ -87,10 +87,12 @@ defmodule CodexPooler.DeletionCompletionTest do
   defp state_lookup_plan(sql, params) do
     Repo.query!("SET LOCAL enable_seqscan = off")
     %{rows: [[plan]]} = Repo.query!("EXPLAIN (FORMAT JSON) " <> sql, params)
-    inspect(plan)
+    plan |> hd() |> Map.fetch!("Plan") |> plan_nodes()
   after
     Repo.query!("SET LOCAL enable_seqscan = on")
   end
+
+  defp plan_nodes(node), do: [node | Enum.flat_map(Map.get(node, "Plans", []), &plan_nodes/1)]
 
   for kind <- [:pool, :key] do
     test "#{kind} partial batches retain operator attribution when a later batch fails", %{owner: owner, scope: scope} do

@@ -162,7 +162,8 @@ defmodule CodexPooler.Upstreams.Quota.Windows.ExpiredPruningTest do
       :telemetry.detach(ref)
       assert_receive {:candidate_query, sql, params}
       %{rows: [[plan]]} = Repo.query!("EXPLAIN (FORMAT JSON) " <> sql, params)
-      assert inspect(plan) =~ "account_quota_windows_expired_reset_idx"
+      nodes = plan |> hd() |> Map.fetch!("Plan") |> plan_nodes()
+      assert Enum.any?(nodes, &(&1["Index Name"] == "account_quota_windows_expired_reset_idx"))
     end
 
     test "runtime state cleanup runs the quota step and reports its count" do
@@ -271,6 +272,8 @@ defmodule CodexPooler.Upstreams.Quota.Windows.ExpiredPruningTest do
       assert DateTime.compare(reset_at, now) == :gt
     end
   end
+
+  defp plan_nodes(node), do: [node | Enum.flat_map(Map.get(node, "Plans", []), &plan_nodes/1)]
 
   defp await_blocked_on(backend_pid, holder_pid) do
     deadline = System.monotonic_time(:millisecond) + @detection_timeout_ms

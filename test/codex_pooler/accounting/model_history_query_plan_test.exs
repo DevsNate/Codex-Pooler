@@ -29,7 +29,19 @@ defmodule CodexPooler.Accounting.ModelHistoryQueryPlanTest do
       Repo.query!(sql, params, cache_statement: name)
       values = Enum.map_join(params, ", ", &sql_literal/1)
       %{rows: [[plan]]} = Repo.query!("EXPLAIN (ANALYZE, FORMAT JSON) EXECUTE #{name}(#{values})")
-      assert inspect(plan) =~ "attempts_model_history_started_idx", "#{mode}: #{inspect(plan)}"
+      # Inspect truncates deeper plans before their attempt scans. Read the
+      # executed nodes so join order and diagnostic fields cannot hide them.
+      scans = plan |> hd() |> Map.fetch!("Plan") |> plan_nodes() |> Enum.filter(&(&1["Relation Name"] == "attempts"))
+      assert length(scans) == 2, "#{mode}: expected both attempt branches"
+
+      access =
+        Enum.map(scans, fn scan ->
+          indexes = scan |> plan_nodes() |> Enum.map(& &1["Index Name"]) |> Enum.reject(&is_nil/1)
+          {indexes, scan["Actual Rows"], scan["Actual Loops"], Map.get(scan, "Rows Removed by Filter", 0), Map.get(scan, "Rows Removed by Index Recheck", 0)}
+        end)
+        |> Enum.sort()
+
+      assert access == [{["attempts_model_history_started_idx"], 1.0, 1, 0, 0}, {["attempts_open_started_idx"], 1.0, 1, 0, 0}], "#{mode}: #{inspect(access)}"
       %{rows: [[generic, custom]]} = Repo.query!("SELECT generic_plans, custom_plans FROM pg_prepared_statements WHERE name = $1", [name])
       assert {generic, custom} == if(mode == "force_generic_plan", do: {2, 0}, else: {0, 2})
       Repo.query!("DEALLOCATE #{name}")
@@ -37,6 +49,8 @@ defmodule CodexPooler.Accounting.ModelHistoryQueryPlanTest do
 
     assert Repo.all(query) |> Enum.map(&{&1.attempt_number, &1.status}) |> Enum.sort() == [{4999, "in_progress"}, {5000, "succeeded"}]
   end
+
+  defp plan_nodes(node), do: [node | Enum.flat_map(Map.get(node, "Plans", []), &plan_nodes/1)]
 
   defp sql_literal(%DateTime{} = value), do: "TIMESTAMPTZ '#{DateTime.to_iso8601(value)}'"
   defp sql_literal([<<_::128>> | _] = value), do: "ARRAY[#{Enum.map_join(value, ", ", &sql_literal/1)}]::uuid[]"
