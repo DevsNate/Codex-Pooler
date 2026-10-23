@@ -23,10 +23,69 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporterTest do
     end
   end
 
-  test "revision 4 records immutable v2 rules and ignores timestamp layout and rule provenance" do
+  test "duration-specific cache write rates are immutable and idempotent snapshot semantics" do
+    identifier = "gpt-example-cache-writes"
+    path = ["models", identifier, "prices", "standard", "default"]
+    rates = %{"input" => 1, "cached_input" => 0.1, "output" => 2, "cache_write_30m" => 1.25, "cache_write_12h" => 2.5}
+    payload = put_in(v2_payload(identifier), path, rates)
+    assert {:ok, %{inserted: 1}} = OpenAIPricingImporter.import_file(write_json!(payload))
+    original = Repo.one!(from row in PricingSnapshot, where: row.model_identifier == ^identifier)
+    assert is_nil(original.cache_write_token_micros)
+    assert original.config["cache_write_rates"] == %{"30m" => "1.25", "12h" => "2.5"}
+    equivalent = put_in(payload, path ++ ["cache_write_30m"], 1.250)
+    assert {:ok, %{inserted: 0}} = OpenAIPricingImporter.import_file(write_json!(equivalent))
+
+    for field <- ~w(cache_write_30m cache_write_12h) do
+      for changed <- [Map.put(rates, field, 9), Map.delete(rates, field)] do
+        assert {:error, %{code: :concurrent_pricing_conflict}} = OpenAIPricingImporter.import_file(write_json!(put_in(payload, path, changed)))
+        assert persisted_snapshot_fields(Repo.get!(PricingSnapshot, original.id)) == persisted_snapshot_fields(original)
+      end
+
+      for value <- [nil, true, -1, "1"] do
+        assert {:error, %{code: :incompatible_pricing_catalog}} = OpenAIPricingImporter.import_file(write_json!(put_in(payload, path ++ [field], value)))
+        assert persisted_snapshot_fields(Repo.get!(PricingSnapshot, original.id)) == persisted_snapshot_fields(original)
+      end
+    end
+
+    assert Repo.aggregate(from(row in PricingSnapshot, where: row.model_identifier == ^identifier), :count) == 1
+  end
+
+  test "unspecified cache write duration stays unpriced without borrowing a historical generic rate" do
+    setup = accounting_setup()
+    old = setup.pricing |> Ecto.Changeset.change(effective_at: ~U[2026-07-27 00:00:00.000000Z], cache_write_token_micros: Decimal.new(99)) |> Repo.update!()
+    old = Repo.get!(PricingSnapshot, old.id)
+    identifier = setup.model.pricing_ref
+    rates = %{"input" => 1, "cached_input" => 0.1, "output" => 2, "cache_write_30m" => 1.25, "cache_write_12h" => 2.5}
+    payload = put_in(v2_payload(identifier), ["models", identifier, "prices", "standard", "default"], rates)
+    assert {:ok, %{price_version: version}} = OpenAIPricingImporter.import_file(write_json!(payload))
+
+    for written <- [nil, 0, 10] do
+      assert {:ok, reserved} = Accounting.reserve(setup.auth, setup.model, %{"model" => setup.model.exposed_model_id, "max_output_tokens" => 10}, %{correlation_id: "cache-duration-#{System.unique_integer([:positive])}"})
+      assert reserved.pricing_status == "priced"
+      assert reserved.pricing_snapshot.price_version == version
+      assert {:ok, attempt} = Accounting.create_attempt(reserved.request, setup.assignment)
+      usage = %{status: "usage_known", input_tokens: 100, cached_input_tokens: 20, output_tokens: 10, total_tokens: 110}
+      usage = if is_nil(written), do: usage, else: Map.put(usage, :cache_write_tokens, written)
+      assert {:ok, result} = Accounting.finalize_success(reserved.request, attempt, usage, %{response_status_code: 200})
+      snapshot = Repo.get!(PricingSnapshot, result.settlement.pricing_snapshot_id)
+      assert snapshot.price_version == version
+
+      if written == 10 do
+        assert result.settlement.details["pricing_status"] == "unpriced_missing_cache_write_rate"
+        assert is_nil(result.settlement.details["settled_cost_micros"])
+      else
+        assert result.settlement.details["pricing_status"] == "priced"
+        assert Decimal.equal?(result.settlement.settled_cost_micros, 102)
+      end
+    end
+
+    assert Repo.get!(PricingSnapshot, old.id) == old
+  end
+
+  test "revision 5 records immutable v2 rules and ignores timestamp layout and rule provenance" do
     payload = v2_payload("gpt-example-a")
     assert {:ok, %{inserted: 1, price_version: version}} = OpenAIPricingImporter.import_file(write_json!(payload))
-    assert version == payload["generated_at"] <> ":importer-format-4"
+    assert version == payload["generated_at"] <> ":importer-format-5"
     original = Repo.one!(from row in PricingSnapshot, where: row.model_identifier == "gpt-example-a")
     assert original.config["catalog_schema_version"] == 2
     assert original.config["context_pricing"]["long_context_input_tokens_gt"] == 500_000
@@ -108,7 +167,7 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporterTest do
     assert Enum.uniq(Enum.map(original, & &1.config["context_pricing"])) |> length() == 1
     assert Enum.map(original, & &1.config["price_bucket"]) |> Enum.sort() == ~w(default long_context short_context)
     next = payload |> Map.put("generated_at", "2026-07-29T00:00:00+00:00") |> update_in(model_path, &Map.delete(&1, "timestamp"))
-    assert {:ok, %{inserted: 3, price_version: "2026-07-29T00:00:00+00:00:importer-format-4"}} = OpenAIPricingImporter.import_file(write_json!(next))
+    assert {:ok, %{inserted: 3, price_version: "2026-07-29T00:00:00+00:00:importer-format-5"}} = OpenAIPricingImporter.import_file(write_json!(next))
     assert Enum.map(original, &persisted_snapshot_fields(Repo.get!(PricingSnapshot, &1.id))) == Enum.map(original, &persisted_snapshot_fields/1)
   end
 
@@ -365,9 +424,9 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporterTest do
     assert Repo.aggregate(PricingSnapshot, :count) == before_count
   end
 
-  test "imports revision 4 rows from the immutable fixture idempotently" do
+  test "imports revision 5 rows from the immutable fixture idempotently" do
     assert {:ok, first} = OpenAIPricingImporter.import_file(@fixture)
-    assert first.price_version == "2026-07-28T17:25:03.915713Z:importer-format-4"
+    assert first.price_version == "2026-07-28T17:25:03.915713Z:importer-format-5"
     assert first.inserted == 208
     assert first.skipped == 90
 
@@ -379,7 +438,7 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporterTest do
       Repo.all(from snapshot in PricingSnapshot, where: snapshot.price_version == ^first.price_version)
 
     assert length(rows) == 208
-    assert Enum.all?(rows, &(&1.config["importer_format_revision"] == "4"))
+    assert Enum.all?(rows, &(&1.config["importer_format_revision"] == "5"))
     assert Enum.all?(rows, &(&1.config["catalog_schema_version"] == 1 and &1.config["context_pricing"] == %{"version" => 1, "status" => "legacy", "long_context_input_tokens_gt" => 272_000}))
     refute Enum.any?(rows, &(&1.config["service_tier"] == "fast"))
   end
@@ -406,9 +465,9 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporterTest do
     rows = Repo.all(from row in PricingSnapshot, where: row.price_version == ^imported.price_version)
 
     for {bucket, rates} <- [
-          {"default", ["60.0", "6.0", "75.0", "300.0"]},
-          {"short_context", ["60.0", "6.0", "75.0", "300.0"]},
-          {"long_context", ["120.0", "12.0", "150.0", "450.0"]}
+          {"default", ["60.0", "6.0", "75.0", "150.0", "300.0"]},
+          {"short_context", ["60.0", "6.0", "75.0", "150.0", "300.0"]},
+          {"long_context", ["120.0", "12.0", "150.0", "300.0", "450.0"]}
         ] do
       assert source_rates(payload, "gpt-6-astra", "ultrafast", bucket) == Enum.map(rates, &Decimal.new/1)
       assert_snapshot_rates(rows, "gpt-6-astra", "ultrafast", rates, bucket)
@@ -425,9 +484,9 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporterTest do
     rows = Repo.all(from row in PricingSnapshot, where: row.price_version == ^imported.price_version)
 
     for {bucket, rates} <- [
-          {"default", ["12.0", "0.6", "15.0", "60.0"]},
-          {"short_context", ["12.0", "0.6", "15.0", "60.0"]},
-          {"long_context", ["24.0", "1.2", "30.0", "90.0"]}
+          {"default", ["12.0", "0.6", "15.0", "30.0", "60.0"]},
+          {"short_context", ["12.0", "0.6", "15.0", "30.0", "60.0"]},
+          {"long_context", ["24.0", "1.2", "30.0", "60.0", "90.0"]}
         ] do
       assert source_rates(payload, "gpt-6.1-sol", "ultrafast", bucket) == Enum.map(rates, &Decimal.new/1)
       assert_snapshot_rates(rows, "gpt-6.1-sol", "ultrafast", rates, bucket)
@@ -700,7 +759,7 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporterTest do
     refute Repo.exists?(from row in PricingSnapshot, where: row.model_identifier == "sample-model")
   end
 
-  test "revision 4 canonical import preserves revision 1 fast rows and attempt references" do
+  test "revision 5 canonical import preserves revision 1 fast rows and attempt references" do
     generated_at = "2026-07-30T10:00:00Z"
     legacy = seed_snapshot!("revision-model", generated_at, "fast", "1", 2)
 
@@ -724,7 +783,7 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporterTest do
     assert {:ok, %{inserted: 1, price_version: version}} =
              OpenAIPricingImporter.import_file(write_json!(payload))
 
-    assert version == "#{generated_at}:importer-format-4"
+    assert version == "#{generated_at}:importer-format-5"
     assert Repo.get!(PricingSnapshot, legacy.id).config["service_tier"] == "fast"
     assert Repo.get!(CodexPooler.Accounting.Attempt, attempt.id).pricing_snapshot_id == legacy.id
 
@@ -1212,7 +1271,7 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporterTest do
   defp source_rates(payload, identifier, tier, price_bucket) do
     bucket = get_in(payload, ["models", identifier, "prices", tier, price_bucket])
 
-    Enum.map(["input", "cached_input", "cache_write", "output"], fn key ->
+    Enum.map(["input", "cached_input", "cache_write_30m", "cache_write_12h", "output"], fn key ->
       bucket |> Map.fetch!(key) |> decimal_from_json_number()
     end)
   end
@@ -1228,11 +1287,13 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporterTest do
       end)
 
     assert snapshot
+    assert is_nil(snapshot.cache_write_token_micros)
 
     actual = [
       snapshot.input_token_micros,
       snapshot.cached_input_token_micros,
-      snapshot.cache_write_token_micros,
+      Decimal.new(snapshot.config["cache_write_rates"]["30m"]),
+      Decimal.new(snapshot.config["cache_write_rates"]["12h"]),
       snapshot.output_token_micros
     ]
 

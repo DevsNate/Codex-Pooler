@@ -56,7 +56,7 @@ defmodule CodexPooler.Accounting.PricingContextBoundariesLifecycleTest do
     assert facts["generation"]["price_version"] == v2.price_version
     assert facts["generation"]["model_identifier"] == context.identifier
     assert facts["generation"]["service_tier"] == "standard"
-    assert to_string(facts["generation"]["importer_format_revision"]) == "4"
+    assert to_string(facts["generation"]["importer_format_revision"]) == "5"
     assert facts["price_bucket"] == "default"
     assert facts["band"] == "lower"
     assert facts["snapshot_id"] == settlement.pricing_snapshot_id

@@ -277,7 +277,7 @@ defmodule CodexPooler.Accounting.PricingContextBoundariesPeerTest do
   end
 
   defp observation(pricing), do: %{version: pricing.snapshot.price_version, cutoff: pricing.context_pricing["long_context_input_tokens_gt"], bucket: pricing.price_bucket, input_rate: Decimal.to_string(pricing.snapshot.input_token_micros), cost_micros: Decimal.to_string(PricingResolution.cost_micros(pricing.snapshot, %{input_tokens: 400_000, output_tokens: 10}))}
-  defp version(generated_at), do: generated_at <> ":importer-format-4"
+  defp version(generated_at), do: generated_at <> ":importer-format-5"
   defp snapshots(model), do: Repo.all(from p in PricingSnapshot, where: p.model_identifier == ^model, order_by: p.id)
   defp receipt(value), do: CodexPooler.TestDiagnostics.puts(fn -> CodexPooler.JSON.encode!(value) end)
 

@@ -10,7 +10,7 @@ defmodule CodexPooler.Catalog.OpenAIPricingFormat do
   @expanded_tool_fields @tool_fields ++ ~w(amounts price_semantics rates)
   @tool_rate_fields ~w(amounts details pricing tool)
   @snapshot_buckets ~w(default short_context long_context)
-  @price_fields ~w(input cached_input cache_write output reasoning)
+  @price_fields ~w(input cached_input cache_write cache_write_30m cache_write_12h output reasoning)
   @pricing_type "per_1m_tokens"
 
   defmodule Row do
@@ -26,6 +26,8 @@ defmodule CodexPooler.Catalog.OpenAIPricingFormat do
             input: Decimal.t() | nil,
             cached_input: Decimal.t() | nil,
             cache_write: Decimal.t() | nil,
+            cache_write_30m: Decimal.t() | nil,
+            cache_write_12h: Decimal.t() | nil,
             output: Decimal.t() | nil,
             reasoning: Decimal.t() | nil,
             request_base: Decimal.t() | nil,
@@ -43,6 +45,8 @@ defmodule CodexPooler.Catalog.OpenAIPricingFormat do
       :input,
       :cached_input,
       :cache_write,
+      :cache_write_30m,
+      :cache_write_12h,
       :output,
       :reasoning,
       :request_base,
@@ -321,7 +325,7 @@ defmodule CodexPooler.Catalog.OpenAIPricingFormat do
   end
 
   defp compare_default_short(state, %Row{} = default, %Row{} = short, path) do
-    fields = ~w(availability input cached_input cache_write output reasoning request_base)a
+    fields = ~w(availability input cached_input cache_write cache_write_30m cache_write_12h output reasoning request_base)a
     if Map.take(semantic_row(default), fields) == Map.take(semantic_row(short), fields), do: state, else: default_short_error(state, path)
   end
 
@@ -612,6 +616,8 @@ defmodule CodexPooler.Catalog.OpenAIPricingFormat do
       input: decimal(values["input"]),
       cached_input: decimal(values["cached_input"]),
       cache_write: decimal(values["cache_write"]),
+      cache_write_30m: decimal(values["cache_write_30m"]),
+      cache_write_12h: decimal(values["cache_write_12h"]),
       output: output,
       reasoning: reasoning,
       request_base: if(availability == "priced", do: Decimal.new(0)),
@@ -732,6 +738,8 @@ defmodule CodexPooler.Catalog.OpenAIPricingFormat do
       :input,
       :cached_input,
       :cache_write,
+      :cache_write_30m,
+      :cache_write_12h,
       :output,
       :reasoning,
       :request_base,
@@ -742,6 +750,8 @@ defmodule CodexPooler.Catalog.OpenAIPricingFormat do
     |> Map.update!(:input, &normalize_decimal/1)
     |> Map.update!(:cached_input, &normalize_decimal/1)
     |> Map.update!(:cache_write, &normalize_decimal/1)
+    |> Map.update!(:cache_write_30m, &normalize_decimal/1)
+    |> Map.update!(:cache_write_12h, &normalize_decimal/1)
     |> Map.update!(:output, &normalize_decimal/1)
     |> Map.update!(:reasoning, &normalize_decimal/1)
     |> Map.update!(:request_base, &normalize_decimal/1)

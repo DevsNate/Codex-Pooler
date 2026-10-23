@@ -246,6 +246,52 @@ defmodule CodexPooler.Catalog.OpenAIPricingPreflightTest do
     end)
   end
 
+  test "duration-specific cache writes retain independent rates without a generic rate" do
+    path = ["models", "future-model", "prices", "standard", "default"]
+    rates = %{"input" => 1, "cached_input" => 0.1, "output" => 2, "cache_write_30m" => 1.25, "cache_write_12h" => 2.5}
+
+    for values <- [rates, Map.delete(rates, "cache_write_30m"), Map.delete(rates, "cache_write_12h"), %{rates | "cache_write_30m" => 0, "cache_write_12h" => 0}] do
+      payload = put_in(context_payload(), path, values)
+      assert %{compatible?: true, rows: [row]} = OpenAIPricingFormat.classify(payload)
+      assert is_nil(row.cache_write)
+      assert row.cache_write_30m == decimal_rate(values["cache_write_30m"])
+      assert row.cache_write_12h == decimal_rate(values["cache_write_12h"])
+      assert Decimal.equal?(row.cached_input, Decimal.new("0.1"))
+    end
+
+    for field <- ~w(cache_write_30m cache_write_12h), value <- [nil, true, -1, "1.25", %{}, []] do
+      payload = put_in(context_payload(), path, Map.put(rates, field, value))
+      assert %{compatible?: false, errors: errors} = OpenAIPricingFormat.classify(payload)
+      assert Enum.any?(errors, &(&1.code == :invalid_snapshot_bucket))
+    end
+
+    refute OpenAIPricingPreflight.validate_payload(put_in(context_payload(), path, Map.put(rates, "cache_write_24h", 5))).compatible?
+  end
+
+  test "duration-specific rates participate in context and service-tier alias equality" do
+    path = ["models", "future-model"]
+    rates = %{"input" => 1, "output" => 2, "cache_write_30m" => 1, "cache_write_12h" => 2}
+    buckets = %{"default" => rates, "short_context" => %{rates | "cache_write_30m" => 1.0, "cache_write_12h" => 2.0}}
+    payload = put_in(context_payload(), path ++ ["prices", "standard"], buckets)
+    assert OpenAIPricingPreflight.validate_payload(payload).compatible?
+
+    for field <- ~w(cache_write_30m cache_write_12h) do
+      changed = put_in(payload, path ++ ["prices", "standard", "short_context", field], 9)
+      assert %{compatible?: false, errors: errors} = OpenAIPricingPreflight.validate_payload(changed)
+      assert Enum.any?(errors, &(&1.code == :conflicting_default_short_alias))
+    end
+
+    rule = get_in(payload, path ++ ["context_pricing", "tiers", "standard"])
+    aliases = payload |> put_in(path ++ ["prices"], %{"fast" => buckets, "priority" => buckets}) |> put_in(path ++ ["context_pricing", "tiers"], %{"fast" => rule, "priority" => rule})
+    assert OpenAIPricingPreflight.validate_payload(aliases).compatible?
+
+    for field <- ~w(cache_write_30m cache_write_12h) do
+      changed = update_in(aliases, path ++ ["prices", "priority"], &Map.new(&1, fn {bucket, prices} -> {bucket, Map.put(prices, field, 9)} end))
+      assert %{compatible?: false, errors: errors} = OpenAIPricingPreflight.validate_payload(changed)
+      assert Enum.any?(errors, &(&1.code == :conflicting_service_tier_alias))
+    end
+  end
+
   test "supports cache_write and exact priced and unavailable bucket shapes" do
     payload = valid_payload()
     result = OpenAIPricingPreflight.validate_payload(payload)
@@ -779,6 +825,10 @@ defmodule CodexPooler.Catalog.OpenAIPricingPreflightTest do
              "short_context" => 0
            }
   end
+
+  defp decimal_rate(nil), do: nil
+  defp decimal_rate(value) when is_integer(value), do: Decimal.new(value)
+  defp decimal_rate(value) when is_float(value), do: Decimal.from_float(value)
 
   defp context_payload do
     valid_payload()

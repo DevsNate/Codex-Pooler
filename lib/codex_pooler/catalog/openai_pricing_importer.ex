@@ -8,7 +8,7 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporter do
   alias CodexPooler.Repo
 
   @source "openai-json-pricing"
-  @revision "4"
+  @revision "5"
   @currency_code "USD"
   @billing_unit "token"
 
@@ -255,9 +255,16 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporter do
         "category" => row.category,
         "categories" => row.categories,
         "availability" => row.availability,
+        "cache_write_rates" => cache_write_rates(row),
         "reasoning_price_source" => row.reasoning_price_source
       }
     }
+  end
+
+  defp cache_write_rates(row) do
+    for {duration, %Decimal{} = rate} <- [{"30m", row.cache_write_30m}, {"12h", row.cache_write_12h}], into: %{} do
+      {duration, rate |> Decimal.normalize() |> Decimal.to_string(:normal)}
+    end
   end
 
   defp persisted_semantics(snapshot) do
@@ -275,6 +282,7 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporter do
       input: snapshot.input_token_micros,
       cached_input: snapshot.cached_input_token_micros,
       cache_write: snapshot.cache_write_token_micros,
+      cache_write_rates: Map.get(snapshot.config, "cache_write_rates", %{}),
       output: snapshot.output_token_micros,
       reasoning: snapshot.reasoning_token_micros,
       request_base: snapshot.request_base_micros,
@@ -301,6 +309,7 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporter do
       input: attrs.input_token_micros,
       cached_input: attrs.cached_input_token_micros,
       cache_write: attrs.cache_write_token_micros,
+      cache_write_rates: attrs.config["cache_write_rates"],
       output: attrs.output_token_micros,
       reasoning: attrs.reasoning_token_micros,
       request_base: attrs.request_base_micros,

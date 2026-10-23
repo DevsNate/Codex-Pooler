@@ -28,7 +28,7 @@ defmodule CodexPooler.Accounting.MissingCachedInputPricingTest do
 
       snapshot = Repo.one!(from p in PricingSnapshot, where: p.model_identifier == ^setup.model.pricing_ref)
       assert_rate(snapshot.cached_input_token_micros, rate)
-      assert snapshot.config["importer_format_revision"] == "4"
+      assert snapshot.config["importer_format_revision"] == "5"
 
       {reserved, result} = settle!(setup, cached)
       assert reserved.pricing_status == "priced"
@@ -50,7 +50,7 @@ defmodule CodexPooler.Accounting.MissingCachedInputPricingTest do
     assert_projection!(setup, result, 400, nil, nil)
   end
 
-  test "revision 4 reimport corrects new settlements without rewriting revision 3 history" do
+  test "revision 5 reimport corrects new settlements without rewriting revision 3 history" do
     setup = accounting_setup()
 
     old =
@@ -75,7 +75,7 @@ defmodule CodexPooler.Accounting.MissingCachedInputPricingTest do
     assert historical_ledger.pricing_snapshot_id == old.id
     payload = catalog(setup.model.pricing_ref, %{"standard" => %{"default" => rates(nil)}})
     assert {:ok, %{inserted: 1, price_version: version}} = import!(payload)
-    assert version == @generated_at <> ":importer-format-4"
+    assert version == @generated_at <> ":importer-format-5"
     assert {:ok, %{inserted: 0}} = import!(payload)
     {_reserved, corrected} = settle!(setup, 400)
     assert corrected.settlement.pricing_snapshot_id != old.id
@@ -83,7 +83,7 @@ defmodule CodexPooler.Accounting.MissingCachedInputPricingTest do
     assert is_nil(corrected.settlement.details["cached_input_cost_micros"])
     assert Repo.get!(PricingSnapshot, old.id) == old
     assert Repo.get!(LedgerEntry, historical_ledger.id) == historical_ledger
-    record("revision_upgrade", %{revision: "4", idempotent_reimport: true, old_snapshot_unchanged: true, old_settlement_unchanged: true, corrected_status: corrected.settlement.details["pricing_status"]})
+    record("revision_upgrade", %{revision: "5", idempotent_reimport: true, old_snapshot_unchanged: true, old_settlement_unchanged: true, corrected_status: corrected.settlement.details["pricing_status"]})
   end
 
   test "final served tier and context bucket cannot borrow an older generation's cached rate" do
@@ -100,7 +100,7 @@ defmodule CodexPooler.Accounting.MissingCachedInputPricingTest do
     assert reserved.pricing_snapshot.config["service_tier"] == "standard"
     assert reserved.pricing_snapshot.config["price_bucket"] == "default"
     selected = Repo.get!(PricingSnapshot, result.settlement.pricing_snapshot_id)
-    assert selected.price_version == "2026-07-29T00:00:00Z:importer-format-4"
+    assert selected.price_version == "2026-07-29T00:00:00Z:importer-format-5"
     assert selected.config["service_tier"] == "priority"
     assert selected.config["price_bucket"] == "long_context"
     assert result.settlement.details["pricing_status"] == @unpriced
@@ -120,7 +120,7 @@ defmodule CodexPooler.Accounting.MissingCachedInputPricingTest do
     record("both_rates_missing", %{status: result.settlement.details["pricing_status"], total_unavailable: true, cached_component_unavailable: true})
   end
 
-  test "revision 4 still fences generations and rejects an absent context rule" do
+  test "revision 5 still fences generations and rejects an absent context rule" do
     setup = accounting_setup()
     Repo.delete!(setup.pricing)
     identifier = setup.model.pricing_ref
