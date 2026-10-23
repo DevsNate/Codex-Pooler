@@ -18,6 +18,10 @@ source_url=https://github.com/icoretech/codex-pooler
 rehearsal=false
 content_hash=''
 source_kind=commit
+cache_dir=''
+cache_imported=false
+cache_exported=false
+builder=default
 if [[ $mode == rehearse || ( $mode == cleanup && ${CI_REHEARSAL:-} == true ) ]]; then
   rehearsal=true
   source_kind=snapshot
@@ -51,17 +55,40 @@ else
   revision_label=$revision
   state="$RUNNER_TEMP/codex-pooler-image-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
   owner="$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT:$revision"
+  if [[ -n ${CI_IMAGE_CACHE_DIR:-} ]]; then
+    [[ $CI_IMAGE_CACHE_DIR == "$RUNNER_TEMP/pooler-image-cache" ]] || fail 'image cache must be RUNNER_TEMP/pooler-image-cache'
+    case "$CI_IMAGE_CACHE_DIR/" in */../*|*/./*) fail 'image cache cannot contain traversal components' ;; esac
+    [[ ! -L $CI_IMAGE_CACHE_DIR && ( ! -e $CI_IMAGE_CACHE_DIR || -d $CI_IMAGE_CACHE_DIR ) ]] || fail 'image cache must be a real directory'
+    cache_dir=$CI_IMAGE_CACHE_DIR
+    builder="pooler-image-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+  fi
 fi
 
 cleanup() {
   [[ -e $state || -L $state ]] || return 0
   [[ -d $state && ! -L $state && -f $state/owner && ! -L $state/owner ]] || return 1
   [[ $(cat "$state/owner") == "$owner" ]] || return 1
-  local tag rc=0
+  local tag owned_builder rc=0
   # Remove credentials even when Docker is unavailable or image removal fails.
-  rm -rf "$state/docker" "$state/context"
+  rm -f "$state/docker/config.json"
+  rm -rf "$state/context"
   export DOCKER_CONFIG="$state/docker" DOCKER_CONTEXT=default
-  unset DOCKER_HOST DOCKER_TLS DOCKER_TLS_VERIFY DOCKER_CERT_PATH
+  unset DOCKER_HOST DOCKER_TLS DOCKER_TLS_VERIFY DOCKER_CERT_PATH BUILDX_CONFIG BUILDX_BUILDER
+  if [[ -f $state/builder && ! -L $state/builder ]]; then
+    owned_builder=$(cat "$state/builder")
+    [[ $rehearsal == false && $owned_builder == "pooler-image-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" ]] || return 1
+    if docker buildx rm --force "$owned_builder"; then
+      rm "$state/builder"
+    else
+      rc=1
+    fi
+  fi
+  [[ -e $state/builder ]] || rm -rf "$state/docker"
+  if [[ -d $state/previous-cache ]]; then
+    [[ -n $cache_dir && ! -L $cache_dir ]] || return 1
+    # Restore a previous valid cache if interruption occurred between directory renames.
+    [[ -e $cache_dir ]] || mv "$state/previous-cache" "$cache_dir" || rc=1
+  fi
   if [[ -f $state/tag && ! -L $state/tag ]]; then
     tag=$(cat "$state/tag")
     [[ $tag =~ ^[a-z0-9][a-z0-9.-]*-${revision:0:8}-[0-9]+$ && ${#tag} -le 128 ]] || return 1
@@ -77,13 +104,22 @@ cleanup() {
 
 if [[ $mode == cleanup ]]; then cleanup; exit; fi
 [[ $(uname -s) == Linux && $(uname -m) == x86_64 ]] || fail 'native Linux x86_64 host required'
-for override in DOCKER_HOST DOCKER_CONTEXT DOCKER_TLS DOCKER_TLS_VERIFY DOCKER_CERT_PATH; do
+for override in DOCKER_HOST DOCKER_CONTEXT DOCKER_TLS DOCKER_TLS_VERIFY DOCKER_CERT_PATH BUILDX_CONFIG BUILDX_BUILDER; do
   [[ -z ${!override:-} ]] || fail "Docker override is forbidden: $override"
 done
 export DOCKER_CONTEXT=default
 [[ $(docker context inspect default --format '{{.Endpoints.docker.Host}}') == unix:///var/run/docker.sock ]] || fail 'local default Docker socket required'
 [[ $(docker info --format '{{.OSType}}/{{.Architecture}}') == linux/x86_64 ]] || fail 'local Linux amd64 daemon required'
-[[ $(docker buildx inspect default | awk '$1 == "Driver:" {print $2}') == docker ]] || fail 'default Docker driver required for local cache'
+if [[ -z $cache_dir ]]; then
+  [[ $(docker buildx inspect default | awk '$1 == "Driver:" {print $2}') == docker ]] || fail 'default Docker driver required for local cache'
+elif [[ -d $cache_dir ]]; then
+  [[ -z $(find "$cache_dir" -type l -print -quit) ]] || fail 'image cache cannot contain symlinks'
+  if [[ -n $(find "$cache_dir" -mindepth 1 -print -quit) ]]; then
+    [[ -f $cache_dir/index.json && -f $cache_dir/oci-layout && -d $cache_dir/blobs ]] || fail 'image cache is not an OCI layout'
+    jq -e '.schemaVersion == 2 and (.manifests | type == "array" and length > 0)' "$cache_dir/index.json" >/dev/null || fail 'invalid image cache index'
+    cache_imported=true
+  fi
+fi
 if [[ $rehearsal == true ]]; then
   [[ ${CI_SOURCE_DIR:-} == /* && -d $CI_SOURCE_DIR && ! -L $CI_SOURCE_DIR ]] || fail 'absolute frozen source directory required'
   [[ ${CI_OUTPUT_DIR:-} == /* && -d $CI_OUTPUT_DIR && ! -L $CI_OUTPUT_DIR ]] || fail 'absolute existing rehearsal output directory required'
@@ -111,6 +147,13 @@ mkdir "$state/context" "$state/docker"
 plugin_dir="${DOCKER_CONFIG:-$HOME/.docker}/cli-plugins"
 if [[ -d $plugin_dir ]]; then ln -s "$plugin_dir" "$state/docker/cli-plugins"; fi
 export DOCKER_CONFIG="$state/docker"
+if [[ -n $cache_dir ]]; then
+  # Builder metadata must use this isolated config, not the caller's Docker credentials.
+  [[ -z $(docker container ls --all --filter "name=^/buildx_buildkit_${builder}0$" --format '{{.ID}}') ]] || fail 'image builder container already exists'
+  docker buildx create --name "$builder" --driver docker-container default >/dev/null
+  printf '%s\n' "$builder" > "$state/builder"
+  docker buildx inspect "$builder" --bootstrap >/dev/null
+fi
 
 extra_labels=()
 if [[ $rehearsal == true ]]; then
@@ -139,7 +182,12 @@ mkdir -p "$evidence"
 : > "$evidence/image-build.log"
 chmod 0644 "$evidence/image-build.log"
 
-docker buildx build --builder default --platform linux/amd64 --load --provenance=false --pull --progress plain \
+cache_args=()
+if [[ -n $cache_dir ]]; then
+  [[ $cache_imported == false ]] || cache_args+=(--cache-from "type=local,src=$cache_dir")
+  cache_args+=(--cache-to "type=local,dest=$state/cache-export,mode=max")
+fi
+docker buildx build --builder "$builder" --platform linux/amd64 --load --provenance=false --pull --progress plain "${cache_args[@]}" \
   --label "org.opencontainers.image.revision=$revision_label" \
   --label "org.opencontainers.image.source=$source_url" "${extra_labels[@]}" \
   --tag "$image:$tag" "$state/context" 2>&1 | tee "$evidence/image-build.log"
@@ -149,6 +197,15 @@ jq -e --arg sha "$revision_label" --arg source "$source_url" '
   .[0].Config.Labels["org.opencontainers.image.revision"] == $sha and
   .[0].Config.Labels["org.opencontainers.image.source"] == $source
 ' "$state/local.json" >/dev/null
+if [[ -n $cache_dir ]]; then
+  [[ -f $state/cache-export/index.json && -f $state/cache-export/oci-layout && -d $state/cache-export/blobs ]] || fail 'image cache export is incomplete'
+  [[ -z $(find "$state/cache-export" -type l -print -quit) ]] || fail 'image cache export contains symlinks'
+  jq -e '.schemaVersion == 2 and (.manifests | type == "array" and length > 0)' "$state/cache-export/index.json" >/dev/null || fail 'invalid image cache export index'
+  [[ ! -e $cache_dir ]] || mv "$cache_dir" "$state/previous-cache"
+  mv "$state/cache-export" "$cache_dir"
+  rm -rf "$state/previous-cache"
+  cache_exported=true
+fi
 
 published=false
 digest=''
@@ -171,8 +228,8 @@ if [[ $rehearsal == false && ${GITHUB_REF:-} == refs/heads/main ]]; then
 fi
 jq -n --arg image "$image" --arg tag "$tag" --arg revision "$revision" \
   --arg sourceKind "$source_kind" --arg contentHash "$content_hash" \
-  --arg digest "$digest" --argjson published "$published" \
-  '{image: $image, tag: $tag, revision: $revision, sourceKind: $sourceKind, contentHash: $contentHash, platform: "linux/amd64", published: $published, digest: $digest}' \
+  --arg digest "$digest" --argjson published "$published" --argjson cacheImported "$cache_imported" --argjson cacheExported "$cache_exported" \
+  '{image: $image, tag: $tag, revision: $revision, sourceKind: $sourceKind, contentHash: $contentHash, platform: "linux/amd64", published: $published, digest: $digest, cacheImported: $cacheImported, cacheExported: $cacheExported}' \
   > "$evidence/image.json"
 chmod 0644 "$evidence/image.json"
 printf 'image=%s:%s source=%s revision=%s snapshot=%s platform=linux/amd64 published=%s digest=%s\n' "$image" "$tag" "$source_kind" "$revision" "$content_hash" "$published" "$digest"

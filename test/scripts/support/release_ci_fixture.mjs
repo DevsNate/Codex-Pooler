@@ -23,17 +23,26 @@ export function successEvidence(target = repository, revision = sha) {
 		repository: { full_name: target },
 		head_repository: { full_name: target },
 	};
-	const jobs = ["Quality", "Development image", "Development gate"].map(
-		(name, index) => ({
-			id: index + 1,
-			name,
-			run_id: run.id,
-			run_attempt: run.run_attempt,
-			head_sha: revision,
-			status: "completed",
-			conclusion: "success",
-		}),
-	);
+	const jobs = [
+		"CI tools",
+		"Static checks",
+		"Dialyzer",
+		"Tests 1/4",
+		"Tests 2/4",
+		"Tests 3/4",
+		"Tests 4/4",
+		"Quality",
+		"Development image",
+		"Development gate",
+	].map((name, index) => ({
+		id: index + 1,
+		name,
+		run_id: run.id,
+		run_attempt: run.run_attempt,
+		head_sha: revision,
+		status: "completed",
+		conclusion: "success",
+	}));
 	return { repository: target, sha: revision, workflow, run, jobs };
 }
 

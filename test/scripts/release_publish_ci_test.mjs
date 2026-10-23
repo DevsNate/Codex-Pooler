@@ -53,6 +53,38 @@ const fromResponses =
 		return structuredClone(values[endpoint]);
 	};
 
+test("every hosted prerequisite must succeed even when the run and aggregate are green", () => {
+	const required = [
+		"CI tools",
+		"Static checks",
+		"Dialyzer",
+		"Tests 1/4",
+		"Tests 2/4",
+		"Tests 3/4",
+		"Tests 4/4",
+		"Quality",
+		"Development image",
+		"Development gate",
+	];
+	assert.deepEqual(
+		successEvidence().jobs.map((job) => job.name),
+		required,
+	);
+	for (const name of required) {
+		const missing = successEvidence();
+		missing.jobs = missing.jobs.filter((job) => job.name !== name);
+		assert.throws(
+			() => assess(missing),
+			/missing or mismatched Development job/,
+		);
+		for (const conclusion of ["failure", "cancelled", "skipped", null]) {
+			const failed = successEvidence();
+			failed.jobs.find((job) => job.name === name).conclusion = conclusion;
+			assert.equal(assess(failed), "failure", `${name}: ${conclusion}`);
+		}
+	}
+});
+
 test("only the complete canonical workflow and required jobs authorize the exact revision", () => {
 	assert.equal(assess(successEvidence()), "success");
 	for (const mutate of [
@@ -143,7 +175,11 @@ test("failed-jobs reruns may reuse prior successful prerequisites but require th
 		(job) => !(job.name === "Development gate" && job.run_attempt === 2),
 	);
 	assert.equal(assess(evidence), "failure");
-	evidence.jobs.push({ ...evidence.jobs[2], id: 30, run_attempt: 2 });
+	evidence.jobs.push({
+		...evidence.jobs.find((job) => job.name === "Development gate"),
+		id: 30,
+		run_attempt: 2,
+	});
 	evidence.jobs.push({
 		...evidence.jobs[0],
 		id: 31,
@@ -167,8 +203,8 @@ test("the collector uses workflow identity, paginated runs and all job attempts"
 		{ total_count: 2, workflow_runs: [evidence.run] },
 	];
 	values[jobList] = [
-		{ total_count: 3, jobs: evidence.jobs.slice(0, 1) },
-		{ total_count: 3, jobs: evidence.jobs.slice(1) },
+		{ total_count: evidence.jobs.length, jobs: evidence.jobs.slice(0, 1) },
+		{ total_count: evidence.jobs.length, jobs: evidence.jobs.slice(1) },
 	];
 	const calls = [];
 	assert.deepEqual(

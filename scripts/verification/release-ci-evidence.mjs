@@ -5,7 +5,18 @@ import { pathToFileURL } from "node:url";
 export const developmentWorkflow = {
 	name: "Development",
 	path: ".github/workflows/development.yml",
-	jobs: ["Quality", "Development image", "Development gate"],
+	jobs: [
+		"CI tools",
+		"Static checks",
+		"Dialyzer",
+		"Tests 1/4",
+		"Tests 2/4",
+		"Tests 3/4",
+		"Tests 4/4",
+		"Quality",
+		"Development image",
+		"Development gate",
+	],
 };
 
 const revisionPattern = /^[a-f0-9]{40}$/;

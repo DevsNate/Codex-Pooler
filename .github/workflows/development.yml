@@ -16,42 +16,164 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  quality:
-    name: Quality
+  tools:
+    name: CI tools
     if: github.repository == 'icoretech/codex-pooler'
-    runs-on: [self-hosted, Linux, X64, ci-amd64]
-    timeout-minutes: 90
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - name: Run quality gates
-        run: bash scripts/ci/run.sh run
-      - name: Remove owned quality resources
+      - name: Restore CI tools image
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/pooler-tools
+          key: pooler-tools-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/ci/Dockerfile') }}
+      - name: Prepare CI tools image
+        id: tools
+        run: bash scripts/ci/hosted.sh tools
+
+  checks:
+    name: ${{ matrix.name }}
+    needs: tools
+    if: github.repository == 'icoretech/codex-pooler'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - lane: static
+            name: Static checks
+          - lane: dialyzer
+            name: Dialyzer
+    env:
+      CI_LANE: ${{ matrix.lane }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Restore CI tools image
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/pooler-tools
+          key: pooler-tools-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/ci/Dockerfile') }}
+      - name: Prepare CI tools image
+        id: tools
+        run: bash scripts/ci/hosted.sh tools
+      - name: Restore lane cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/pooler-cache
+          key: pooler-lane-v2-${{ runner.os }}-${{ runner.arch }}-${{ github.ref == 'refs/heads/main' && 'main' || 'validation' }}-${{ steps.tools.outputs.runtime_identity }}-${{ hashFiles('mix.lock') }}-${{ env.CI_LANE }}-${{ github.sha }}
+          restore-keys: |
+            pooler-lane-v2-${{ runner.os }}-${{ runner.arch }}-${{ github.ref == 'refs/heads/main' && 'main' || 'validation' }}-${{ steps.tools.outputs.runtime_identity }}-${{ hashFiles('mix.lock') }}-${{ env.CI_LANE }}-
+      - name: Run lane
+        run: bash scripts/ci/hosted.sh run
+      - name: Remove owned lane resources
         if: always()
-        run: bash scripts/ci/run.sh cleanup
-      - name: Save quality evidence
+        run: bash scripts/ci/hosted.sh cleanup
+      - name: Save lane evidence
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: development-quality-${{ github.run_id }}-${{ github.run_attempt }}
+          name: development-${{ env.CI_LANE }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            tmp/ci-results/github-${{ github.run_id }}-${{ github.run_attempt }}/source.json
-            tmp/ci-results/github-${{ github.run_id }}-${{ github.run_attempt }}/receipt.json
-            tmp/ci-results/github-${{ github.run_id }}-${{ github.run_attempt }}/*.log
+            tmp/ci-results/github-${{ github.run_id }}-${{ github.run_attempt }}-${{ env.CI_LANE }}/source.json
+            tmp/ci-results/github-${{ github.run_id }}-${{ github.run_attempt }}-${{ env.CI_LANE }}/receipt.json
+            tmp/ci-results/github-${{ github.run_id }}-${{ github.run_attempt }}-${{ env.CI_LANE }}/*.log
+            tmp/ci-results/github-${{ github.run_id }}-${{ github.run_attempt }}-${{ env.CI_LANE }}/*.tsv
           if-no-files-found: error
           retention-days: 7
+
+  tests:
+    name: Tests ${{ matrix.partition }}/4
+    needs: tools
+    if: github.repository == 'icoretech/codex-pooler'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        partition: [1, 2, 3, 4]
+    env:
+      CI_LANE: partition-${{ matrix.partition }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Restore CI tools image
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/pooler-tools
+          key: pooler-tools-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/ci/Dockerfile') }}
+      - name: Prepare CI tools image
+        id: tools
+        run: bash scripts/ci/hosted.sh tools
+      - name: Restore lane cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/pooler-cache
+          key: pooler-lane-v2-${{ runner.os }}-${{ runner.arch }}-${{ github.ref == 'refs/heads/main' && 'main' || 'validation' }}-${{ steps.tools.outputs.runtime_identity }}-${{ hashFiles('mix.lock') }}-${{ env.CI_LANE }}-${{ github.sha }}
+          restore-keys: |
+            pooler-lane-v2-${{ runner.os }}-${{ runner.arch }}-${{ github.ref == 'refs/heads/main' && 'main' || 'validation' }}-${{ steps.tools.outputs.runtime_identity }}-${{ hashFiles('mix.lock') }}-${{ env.CI_LANE }}-
+      - name: Run product and tooling partition
+        run: bash scripts/ci/hosted.sh run
+      - name: Remove owned lane resources
+        if: always()
+        run: bash scripts/ci/hosted.sh cleanup
+      - name: Save lane evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: development-${{ env.CI_LANE }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            tmp/ci-results/github-${{ github.run_id }}-${{ github.run_attempt }}-${{ env.CI_LANE }}/source.json
+            tmp/ci-results/github-${{ github.run_id }}-${{ github.run_attempt }}-${{ env.CI_LANE }}/receipt.json
+            tmp/ci-results/github-${{ github.run_id }}-${{ github.run_attempt }}-${{ env.CI_LANE }}/*.log
+            tmp/ci-results/github-${{ github.run_id }}-${{ github.run_attempt }}-${{ env.CI_LANE }}/*.tsv
+          if-no-files-found: error
+          retention-days: 7
+
+  quality:
+    name: Quality
+    needs: [tools, checks, tests]
+    if: always() && github.repository == 'icoretech/codex-pooler'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every quality lane
+        env:
+          TOOLS_RESULT: ${{ needs.tools.result }}
+          CHECKS_RESULT: ${{ needs.checks.result }}
+          TESTS_RESULT: ${{ needs.tests.result }}
+        run: |
+          set -euo pipefail
+          [[ "$TOOLS_RESULT" == success && "$CHECKS_RESULT" == success && "$TESTS_RESULT" == success ]] || {
+            printf 'quality rejected: tools=%s checks=%s tests=%s\n' "$TOOLS_RESULT" "$CHECKS_RESULT" "$TESTS_RESULT" >&2
+            exit 1
+          }
 
   image:
     name: Development image
     needs: quality
     if: github.repository == 'icoretech/codex-pooler'
-    runs-on: [self-hosted, Linux, X64, ci-amd64]
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      - name: Select image cache directory
+        run: echo "CI_IMAGE_CACHE_DIR=$RUNNER_TEMP/pooler-image-cache" >> "$GITHUB_ENV"
+      - name: Restore Docker build cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.CI_IMAGE_CACHE_DIR }}
+          key: pooler-image-v2-${{ runner.os }}-${{ runner.arch }}-${{ github.ref == 'refs/heads/main' && 'main' || 'validation' }}-${{ hashFiles('Dockerfile', 'mix.lock', 'assets/package-lock.json') }}-${{ github.sha }}
+          restore-keys: |
+            pooler-image-v2-${{ runner.os }}-${{ runner.arch }}-${{ github.ref == 'refs/heads/main' && 'main' || 'validation' }}-${{ hashFiles('Dockerfile', 'mix.lock', 'assets/package-lock.json') }}-
       - name: Build development branch
         if: github.ref != 'refs/heads/main'
         run: bash scripts/verification/development-image.sh run
@@ -77,7 +199,7 @@ jobs:
     name: Development gate
     needs: [quality, image]
     if: always() && github.repository == 'icoretech/codex-pooler'
-    runs-on: [self-hosted, Linux, X64, ci-amd64]
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
       - name: Require every development job

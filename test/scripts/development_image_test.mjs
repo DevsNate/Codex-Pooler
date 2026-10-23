@@ -8,6 +8,7 @@ import {
 	readFileSync,
 	rmSync,
 	statSync,
+	symlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -81,7 +82,17 @@ if (args[0] === 'context') console.log(env.FIXTURE_DOCKER_ENDPOINT || 'unix:///v
 else if (args[0] === 'info') {
   if (env.FIXTURE_DAEMON_DOWN === '1' && fs.existsSync(present)) process.exit(30);
   console.log('linux/x86_64');
-} else if (args[0] === 'buildx' && args[1] === 'inspect') console.log('Driver: docker');
+} else if (args[0] === 'container' && args[1] === 'ls') {
+  if (env.FIXTURE_BUILDER_COLLISION === '1') console.log('foreign-container');
+} else if (args[0] === 'buildx' && args[1] === 'create') {
+  fs.writeFileSync(path.join(root, 'builder-present'), env.DOCKER_CONFIG);
+} else if (args[0] === 'buildx' && args[1] === 'rm') {
+  if (env.FIXTURE_BUILDER_REMOVE_FAILURE === '1') process.exit(45);
+  fs.rmSync(path.join(root, 'builder-present'), {force:true});
+} else if (args[0] === 'buildx' && args[1] === 'inspect') {
+  if (args.includes('--bootstrap') && env.FIXTURE_BOOTSTRAP_FAILURE === '1') process.exit(46);
+  console.log('Driver: docker');
+}
 else if (args[0] === 'buildx' && args[1] === 'build') {
   const context = args.at(-1);
   fs.writeFileSync(path.join(root, 'source.json'), JSON.stringify({payload: fs.readFileSync(path.join(context, 'payload'), 'utf8'), removed: fs.existsSync(path.join(context, 'removed.txt')), env: fs.existsSync(path.join(context, '.env')), untracked: fs.existsSync(path.join(context, 'untracked')), git: fs.existsSync(path.join(context, '.git'))}));
@@ -89,6 +100,13 @@ else if (args[0] === 'buildx' && args[1] === 'build') {
   for (let i = 0; i < args.length; i++) if (args[i] === '--label') { const value = args[++i]; const split = value.indexOf('='); buildLabels[value.slice(0, split)] = value.slice(split + 1); }
   fs.writeFileSync(labelsPath, JSON.stringify(buildLabels));
   if (env.FIXTURE_BUILD_FAILURE === '1') process.exit(37);
+  if (args.includes('--cache-to') && env.FIXTURE_CACHE_EXPORT_MISSING !== '1') {
+    const output = args[args.indexOf('--cache-to') + 1].split(',').find(x=>x.startsWith('dest=')).slice(5);
+    fs.mkdirSync(path.join(output,'blobs'),{recursive:true});
+    fs.writeFileSync(path.join(output,'index.json'),JSON.stringify({schemaVersion:2,manifests:[{digest:'${digest}'}]}));
+    fs.writeFileSync(path.join(output,'oci-layout'),JSON.stringify({imageLayoutVersion:'1.0.0'}));
+    fs.writeFileSync(path.join(output,'blobs','fresh-layer'),'exported layer');
+  }
   fs.writeFileSync(present, 'built');
   console.log('fixture build complete');
 } else if (args[0] === 'image' && args[1] === 'inspect') {
@@ -135,6 +153,8 @@ else if (args[0] === 'buildx' && args[1] === 'build') {
 		"DOCKER_TLS_VERIFY",
 		"DOCKER_CERT_PATH",
 		"DOCKER_CONFIG",
+		"BUILDX_CONFIG",
+		"BUILDX_BUILDER",
 		"ICORETECH_REGISTRY_USER",
 		"ICORETECH_REGISTRY_PASSWORD",
 		"GITHUB_TOKEN",
@@ -145,6 +165,7 @@ else if (args[0] === 'buildx' && args[1] === 'build') {
 		"CI_SOURCE_RECEIPT",
 		"CI_OUTPUT_DIR",
 		"CI_STATE_ROOT",
+		"CI_IMAGE_CACHE_DIR",
 	])
 		if (!(name in overrides)) delete env[name];
 	return {
@@ -269,6 +290,201 @@ test("only main publishes and verifies the registry digest and source labels", (
 	assert.equal(readFileSync(join(sibling, "keep"), "utf8"), "unrelated");
 });
 
+function hostedCache(f, warm = false) {
+	const cache = join(f.env.RUNNER_TEMP, "pooler-image-cache");
+	f.env.CI_IMAGE_CACHE_DIR = cache;
+	if (warm) {
+		mkdirSync(join(cache, "blobs"), { recursive: true });
+		writeFileSync(
+			join(cache, "index.json"),
+			JSON.stringify({ schemaVersion: 2, manifests: [{ digest }] }),
+		);
+		writeFileSync(
+			join(cache, "oci-layout"),
+			JSON.stringify({ imageLayoutVersion: "1.0.0" }),
+		);
+		writeFileSync(join(cache, "blobs/old-layer"), "previous layer");
+	}
+	return cache;
+}
+
+for (const warm of [false, true]) {
+	test(`hosted ${warm ? "warm" : "cold"} image build exports a fresh reusable cache and removes its builder`, (t) => {
+		const f = fixture(t);
+		const cache = hostedCache(f, warm);
+		const result = f.run();
+		assert.equal(result.status, 0, result.stderr);
+		const calls = f.calls();
+		const create = calls.find(({ args }) => args[1] === "create");
+		assert.equal(create.config, join(f.state, "docker"));
+		assert.deepEqual(create.args.slice(0, 6), [
+			"buildx",
+			"create",
+			"--name",
+			"pooler-image-123-2",
+			"--driver",
+			"docker-container",
+		]);
+		const build = calls.find(({ args }) => args[1] === "build").args;
+		assert.equal(build[build.indexOf("--builder") + 1], "pooler-image-123-2");
+		assert.equal(build.includes("--cache-from"), warm);
+		if (warm)
+			assert.equal(
+				build[build.indexOf("--cache-from") + 1],
+				`type=local,src=${cache}`,
+			);
+		assert.equal(
+			build[build.indexOf("--cache-to") + 1],
+			`type=local,dest=${f.state}/cache-export,mode=max`,
+		);
+		assert.equal(
+			readFileSync(join(cache, "blobs/fresh-layer"), "utf8"),
+			"exported layer",
+		);
+		assert.equal(existsSync(join(cache, "blobs/old-layer")), false);
+		assert.equal(existsSync(join(f.root, "builder-present")), false);
+		assert.equal(existsSync(f.state), false);
+		const receipt = JSON.parse(readFileSync(join(f.evidence, "image.json")));
+		assert.equal(receipt.cacheImported, warm);
+		assert.equal(receipt.cacheExported, true);
+		assert.equal(receipt.published, false);
+		assert.ok(
+			calls.some(
+				({ args }) =>
+					args[0] === "buildx" &&
+					args[1] === "rm" &&
+					args.at(-1) === "pooler-image-123-2",
+			),
+		);
+	});
+}
+
+for (const [name, override, code] of [
+	["build", { FIXTURE_BUILD_FAILURE: "1" }, 37],
+	["cache export", { FIXTURE_CACHE_EXPORT_MISSING: "1" }, 1],
+	["builder bootstrap", { FIXTURE_BOOTSTRAP_FAILURE: "1" }, 46],
+]) {
+	test(`hosted ${name} failure keeps the previous cache and cleans owned resources`, (t) => {
+		const f = fixture(t, override);
+		const cache = hostedCache(f, true);
+		const result = f.run();
+		assert.equal(result.status, code, result.stderr);
+		assert.equal(
+			readFileSync(join(cache, "blobs/old-layer"), "utf8"),
+			"previous layer",
+		);
+		assert.equal(existsSync(join(f.root, "builder-present")), false);
+		assert.equal(existsSync(f.state), false);
+		assert.equal(existsSync(join(f.evidence, "image.json")), false);
+	});
+}
+
+test("hosted builder cleanup failure removes credentials and retains only owned metadata for retry", (t) => {
+	const f = fixture(t, {
+		GITHUB_REF: "refs/heads/main",
+		ICORETECH_REGISTRY_USER: "sample-user",
+		ICORETECH_REGISTRY_PASSWORD: "sample-password",
+		FIXTURE_BUILDER_REMOVE_FAILURE: "1",
+	});
+	const cache = hostedCache(f);
+	assert.equal(f.run().status, 1);
+	assert.equal(existsSync(join(f.state, "docker/config.json")), false);
+	assert.equal(existsSync(join(f.state, "context")), false);
+	assert.equal(existsSync(join(f.state, "builder")), true);
+	assert.equal(existsSync(join(cache, "index.json")), true);
+	delete f.env.FIXTURE_BUILDER_REMOVE_FAILURE;
+	assert.equal(f.run("cleanup").status, 0);
+	assert.equal(existsSync(f.state), false);
+});
+
+test("a failed cache promotion restores the previous complete cache", (t) => {
+	const f = fixture(t);
+	const cache = hostedCache(f, true);
+	writeFileSync(
+		join(f.root, "bin/mv"),
+		'#!/usr/bin/env bash\ncase "$1" in */cache-export) exit 51;; esac\nexec /bin/mv "$@"\n',
+		{ mode: 0o755 },
+	);
+	const result = f.run();
+	assert.equal(result.status, 51, result.stderr);
+	assert.equal(
+		readFileSync(join(cache, "blobs/old-layer"), "utf8"),
+		"previous layer",
+	);
+	assert.equal(existsSync(join(cache, "blobs/fresh-layer")), false);
+	assert.equal(existsSync(f.state), false);
+	assert.equal(existsSync(join(f.evidence, "image.json")), false);
+});
+
+for (const [name, mutate, message] of [
+	[
+		"outside runner temporary directory",
+		(f) => {
+			f.env.CI_IMAGE_CACHE_DIR = join(f.root, "cache");
+		},
+		/must be RUNNER_TEMP/,
+	],
+	[
+		"cache symlink",
+		(f) => {
+			symlinkSync(f.repo, hostedCache(f));
+		},
+		/real directory/,
+	],
+	[
+		"nested symlink",
+		(f) => {
+			symlinkSync(f.repo, join(hostedCache(f, true), "foreign"));
+		},
+		/cannot contain symlinks/,
+	],
+	[
+		"non-cache contents",
+		(f) => {
+			const cache = hostedCache(f);
+			mkdirSync(cache);
+			writeFileSync(join(cache, "keep"), "foreign");
+		},
+		/not an OCI layout/,
+	],
+	[
+		"invalid index",
+		(f) => {
+			writeFileSync(join(hostedCache(f, true), "index.json"), "{}");
+		},
+		/invalid image cache index/,
+	],
+	[
+		"existing builder",
+		(f) => {
+			hostedCache(f);
+			f.env.FIXTURE_BUILDER_COLLISION = "1";
+		},
+		/builder container already exists/,
+	],
+]) {
+	test(`hosted publisher refuses ${name} before building or publishing`, (t) => {
+		const f = fixture(t);
+		mutate(f);
+		const result = f.run();
+		assert.equal(result.status, 1, result.stderr);
+		assert.match(result.stderr, message);
+		assert.equal(
+			f
+				.calls()
+				.some(
+					({ args }) =>
+						args[1] === "build" || ["login", "push"].includes(args[0]),
+				),
+			false,
+		);
+		assert.equal(
+			f.calls().some(({ args }) => args[0] === "buildx" && args[1] === "rm"),
+			false,
+		);
+	});
+}
+
 for (const [name, overrides, pattern] of [
 	["pull requests", { GITHUB_EVENT_NAME: "pull_request" }, /only branch push/],
 	["tag pushes", { GITHUB_REF: "refs/tags/v1.0.0" }, /only branch push/],
@@ -298,6 +514,16 @@ for (const [name, overrides, pattern] of [
 	[
 		"Docker redirection",
 		{ DOCKER_HOST: "tcp://example.com:2375" },
+		/Docker override is forbidden/,
+	],
+	[
+		"Buildx metadata redirection",
+		{ BUILDX_CONFIG: "/tmp/foreign-buildx" },
+		/Docker override is forbidden/,
+	],
+	[
+		"Buildx builder redirection",
+		{ BUILDX_BUILDER: "foreign-builder" },
 		/Docker override is forbidden/,
 	],
 	[
