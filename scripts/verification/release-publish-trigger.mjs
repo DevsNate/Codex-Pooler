@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { appendFile, readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
+import { trustedDevelopmentRun } from "./release-ci-evidence.mjs";
 import { parseTag } from "./release-publish-guard.mjs";
 
 const deferred = () => ({
@@ -8,17 +9,25 @@ const deferred = () => ({
 	reason: "published_release_not_found",
 });
 
-export function publicationCandidate(eventName, event, refs, releases) {
+export function publicationCandidate(
+	eventName,
+	event,
+	refs,
+	releases,
+	repository = "icoretech/codex-pooler",
+) {
 	let candidates;
-	if (eventName === "status") {
+	if (eventName === "workflow_run") {
+		const run = event.workflow_run;
 		if (
-			event.context !== "continuous-integration/drone/push" ||
-			event.state !== "success"
+			event.action !== "completed" ||
+			event.repository?.full_name !== repository ||
+			!trustedDevelopmentRun(run, repository) ||
+			run.status !== "completed" ||
+			run.conclusion !== "success"
 		)
-			return { publish: false, reason: "irrelevant_status" };
-		if (!/^[a-f0-9]{40}$/.test(event.sha ?? ""))
-			throw new Error("invalid status revision");
-		candidates = refs.filter((ref) => ref.sha === event.sha);
+			return { publish: false, reason: "irrelevant_workflow_run" };
+		candidates = refs.filter((ref) => ref.sha === run.head_sha);
 	} else {
 		let tag;
 		if (eventName === "workflow_dispatch")
@@ -94,7 +103,13 @@ async function main(args) {
 			return [];
 		}
 	});
-	const result = publicationCandidate(eventName, event, refs, releases.flat());
+	const result = publicationCandidate(
+		eventName,
+		event,
+		refs,
+		releases.flat(),
+		process.env.GITHUB_REPOSITORY || "icoretech/codex-pooler",
+	);
 	const lines = [`publish=${result.publish}`, `reason=${result.reason}`];
 	if (result.publish)
 		lines.push(

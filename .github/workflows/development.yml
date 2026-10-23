@@ -1,0 +1,92 @@
+name: Development
+
+on:
+  push:
+    branches:
+      - '**'
+      - '!release-please--branches--main--components--codex-pooler'
+      - '!release-please--branches--main--components--codex-pooler--release-notes'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: development-${{ github.ref }}
+  queue: max
+  cancel-in-progress: false
+
+jobs:
+  quality:
+    name: Quality
+    if: github.repository == 'icoretech/codex-pooler'
+    runs-on: [self-hosted, Linux, X64, ci-amd64]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Run quality gates
+        run: bash scripts/ci/run.sh run
+      - name: Remove owned quality resources
+        if: always()
+        run: bash scripts/ci/run.sh cleanup
+      - name: Save quality evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: development-quality-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            tmp/ci-results/github-${{ github.run_id }}-${{ github.run_attempt }}/source.json
+            tmp/ci-results/github-${{ github.run_id }}-${{ github.run_attempt }}/receipt.json
+            tmp/ci-results/github-${{ github.run_id }}-${{ github.run_attempt }}/*.log
+          if-no-files-found: error
+          retention-days: 7
+
+  image:
+    name: Development image
+    needs: quality
+    if: github.repository == 'icoretech/codex-pooler'
+    runs-on: [self-hosted, Linux, X64, ci-amd64]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Build development branch
+        if: github.ref != 'refs/heads/main'
+        run: bash scripts/verification/development-image.sh run
+      - name: Build and publish main development image
+        if: github.ref == 'refs/heads/main'
+        env:
+          ICORETECH_REGISTRY_USER: ${{ secrets.ICORETECH_REGISTRY_USER }}
+          ICORETECH_REGISTRY_PASSWORD: ${{ secrets.ICORETECH_REGISTRY_PASSWORD }}
+        run: bash scripts/verification/development-image.sh run
+      - name: Remove owned image resources
+        if: always()
+        run: bash scripts/verification/development-image.sh cleanup
+      - name: Save image evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: development-image-${{ github.run_id }}-${{ github.run_attempt }}
+          path: tmp/ci-results/github-${{ github.run_id }}-${{ github.run_attempt }}/image*
+          if-no-files-found: error
+          retention-days: 7
+
+  gate:
+    name: Development gate
+    needs: [quality, image]
+    if: always() && github.repository == 'icoretech/codex-pooler'
+    runs-on: [self-hosted, Linux, X64, ci-amd64]
+    timeout-minutes: 5
+    steps:
+      - name: Require every development job
+        env:
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          IMAGE_RESULT: ${{ needs.image.result }}
+        run: |
+          set -euo pipefail
+          [[ "$QUALITY_RESULT" == success && "$IMAGE_RESULT" == success ]] || {
+            printf 'development gate rejected: quality=%s image=%s\n' "$QUALITY_RESULT" "$IMAGE_RESULT" >&2
+            exit 1
+          }

@@ -1,9 +1,9 @@
 import { appendFile, readFile, writeFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
+import { developmentConclusion } from "./release-ci-evidence.mjs";
 
 const stableVersion =
 	/^(?:codex-pooler-)?v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$/;
-const requiredStatus = "continuous-integration/drone/push";
 
 export function parseTag(tag) {
 	const match = typeof tag === "string" ? stableVersion.exec(tag) : null;
@@ -41,16 +41,18 @@ function newer(left, right) {
 	return false;
 }
 
-export function releasePublication(tag, sha, status, releases, registry = {}) {
+export function releasePublication(
+	tag,
+	sha,
+	status,
+	releases,
+	registry = {},
+	repository = "icoretech/codex-pooler",
+) {
 	const selected = parseTag(tag);
-	if (!/^[a-f0-9]{40}$/.test(sha) || status.sha !== sha)
-		throw new Error("CI status does not describe the checked-out revision");
-	const check = status.statuses?.find(
-		(item) => item.context === requiredStatus,
-	);
-	if (check?.state !== "success")
+	if (developmentConclusion(sha, status, repository) !== "success")
 		throw new Error(
-			"required Drone push status has not succeeded for this revision",
+			"required Development push workflow has not succeeded for this revision",
 		);
 	const release = releases.find((item) => item.tag_name === tag);
 	if (!release || release.draft)
@@ -374,6 +376,7 @@ async function main(args) {
 		JSON.parse(status),
 		releases.flat(),
 		registryState,
+		process.env.GITHUB_REPOSITORY || "icoretech/codex-pooler",
 	);
 	for (const [alias, state] of Object.entries(result.aliasStatus)) {
 		if (state === "registry_evidence_unavailable")

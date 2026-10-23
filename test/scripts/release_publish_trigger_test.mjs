@@ -5,91 +5,95 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { publicationCandidate } from "../../scripts/verification/release-publish-trigger.mjs";
+import {
+	completionEvent,
+	repository,
+	sha,
+	successEvidence,
+} from "./support/release_ci_fixture.mjs";
 
-const sha = "a".repeat(40);
 const tag = "v1.2.3";
 const refs = [{ tag, sha }];
 const releases = [{ tag_name: tag, draft: false, prerelease: false }];
-const passed = {
-	context: "continuous-integration/drone/push",
-	state: "success",
-	sha,
-};
+const passed = completionEvent();
+const candidate = (eventName, event, tags = refs, published = releases) =>
+	publicationCandidate(eventName, event, tags, published, repository);
 
-test("release-first publication resumes on Drone success after the former deadline", () => {
+test("release-first publication resumes on Development completion without a polling deadline", () => {
 	assert.equal(
-		publicationCandidate(
-			"workflow_dispatch",
-			{ inputs: { tag } },
-			refs,
-			releases,
-		).revision,
+		candidate("workflow_dispatch", { inputs: { tag } }).revision,
 		sha,
 	);
-	assert.equal(
-		publicationCandidate(
-			"status",
-			{ ...passed, updated_at: "2026-01-01T01:00:00Z" },
-			refs,
-			releases,
-		).releaseTag,
-		tag,
-	);
+	assert.equal(candidate("workflow_run", passed).releaseTag, tag);
 });
 
-test("Drone-first publication waits for the release and resumes on its dispatch or publication event", () => {
-	assert.equal(publicationCandidate("status", passed, refs, []).publish, false);
+test("CI-first publication waits for the release and resumes on dispatch or publication", () => {
+	assert.equal(candidate("workflow_run", passed, refs, []).publish, false);
 	for (const [eventName, event] of [
 		["workflow_dispatch", { inputs: { tag } }],
 		["release", { action: "published", release: releases[0] }],
 		["push", { ref: `refs/tags/${tag}` }],
-	]) {
-		assert.equal(
-			publicationCandidate(eventName, event, refs, releases).revision,
-			sha,
-		);
-	}
+	])
+		assert.equal(candidate(eventName, event).revision, sha);
 });
 
-test("failed, pending, unrelated and unreleased status revisions cannot select a publication", () => {
-	for (const event of [
-		{ ...passed, state: "pending" },
-		{ ...passed, state: "failure" },
-		{ ...passed, state: "error" },
-		{ ...passed, context: "other-ci" },
-		{ ...passed, sha: "b".repeat(40) },
-	]) {
+test("failed, pending, foreign and unrelated workflow events cannot select publication", () => {
+	for (const override of [
+		{ status: "in_progress", conclusion: null },
+		{ conclusion: "failure" },
+		{ conclusion: "cancelled" },
+		{ conclusion: "skipped" },
+		{ name: "Other" },
+		{ path: ".github/workflows/other.yml" },
+		{ event: "pull_request" },
+		{ event: "workflow_dispatch" },
+		{ workflow_id: 0 },
+		{ run_attempt: 0 },
+		{ head_sha: "b".repeat(40) },
+		{ head_sha: "invalid" },
+		{ repository: { full_name: "other-org/sample-app" } },
+		{ head_repository: { full_name: "other-org/sample-app" } },
+	])
 		assert.equal(
-			publicationCandidate("status", event, refs, releases).publish,
+			candidate("workflow_run", {
+				...passed,
+				workflow_run: { ...passed.workflow_run, ...override },
+			}).publish,
 			false,
 		);
-	}
 	assert.equal(
-		publicationCandidate("status", passed, refs, [
-			{ ...releases[0], draft: true },
-		]).publish,
+		candidate("workflow_run", { ...passed, action: "requested" }).publish,
 		false,
 	);
 	assert.equal(
-		publicationCandidate(
-			"status",
-			{ ...passed, state: "success" },
-			refs,
-			releases,
-		).publish,
-		true,
+		candidate("workflow_run", {
+			...passed,
+			repository: { full_name: "other-org/sample-app" },
+		}).publish,
+		false,
+	);
+	assert.equal(
+		candidate("workflow_run", passed, refs, [{ ...releases[0], draft: true }])
+			.publish,
+		false,
 	);
 });
 
-test("duplicate success selects the same exact release; invalid or ambiguous candidates are rejected", () => {
-	for (let delivery = 0; delivery < 2; delivery += 1) {
-		assert.deepEqual(publicationCandidate("status", passed, refs, releases), {
+test("the completed run head SHA selects the release independently of the default-branch SHA", () => {
+	assert.equal(
+		candidate("workflow_run", { ...passed, sha: "b".repeat(40) }).revision,
+		sha,
+	);
+});
+
+test("duplicate success selects the same exact release; invalid or ambiguous tags are rejected", () => {
+	for (let delivery = 0; delivery < 2; delivery += 1)
+		assert.deepEqual(candidate("workflow_run", passed), {
 			publish: true,
 			reason: "release_and_revision_selected",
 			releaseTag: tag,
 			revision: sha,
 		});
-	}
 	for (const invalid of [
 		"main",
 		"v1.2",
@@ -97,35 +101,23 @@ test("duplicate success selects the same exact release; invalid or ambiguous can
 		"v1.2.3+meta",
 		"v1.2.3\nlatest",
 		"v1.2.3\n",
-	]) {
+	])
 		assert.throws(() =>
-			publicationCandidate(
-				"workflow_dispatch",
-				{ inputs: { tag: invalid } },
-				refs,
-				releases,
-			),
+			candidate("workflow_dispatch", { inputs: { tag: invalid } }),
 		);
-	}
-	assert.throws(() =>
-		publicationCandidate(
-			"status",
-			{ ...passed, sha: "invalid" },
-			refs,
-			releases,
-		),
-	);
-	assert.throws(() =>
-		publicationCandidate(
-			"status",
-			passed,
-			[...refs, { tag: "codex-pooler-v1.2.3", sha }],
-			[...releases, { ...releases[0], tag_name: "codex-pooler-v1.2.3" }],
-		),
+	assert.throws(
+		() =>
+			candidate(
+				"workflow_run",
+				passed,
+				[...refs, { tag: "1.2.3", sha }],
+				[...releases, { ...releases[0], tag_name: "1.2.3" }],
+			),
+		/multiple published/,
 	);
 });
 
-test("CLI resolves real lightweight and annotated git tags, and writes deferred outputs", (t) => {
+test("CLI resolves real lightweight and annotated tags, and writes deferred outputs", (t) => {
 	const root = mkdtempSync(join(tmpdir(), "release-trigger-"));
 	t.after(() => rmSync(root, { recursive: true, force: true }));
 	const git = (...args) =>
@@ -157,7 +149,7 @@ test("CLI resolves real lightweight and annotated git tags, and writes deferred 
 	git("tag", "not-a-release");
 	writeFileSync(
 		join(root, "event.json"),
-		JSON.stringify({ ...passed, sha: revision }),
+		JSON.stringify(completionEvent(successEvidence(repository, revision))),
 	);
 	writeFileSync(join(root, "releases.json"), JSON.stringify([releases]));
 	const script = new URL(
@@ -166,21 +158,24 @@ test("CLI resolves real lightweight and annotated git tags, and writes deferred 
 	).pathname;
 	const args = [
 		script,
-		"status",
+		"workflow_run",
 		join(root, "event.json"),
 		join(root, "releases.json"),
 		join(root, "output"),
 	];
-	const result = JSON.parse(
-		execFileSync(process.execPath, args, { cwd: root, encoding: "utf8" }),
+	const options = {
+		cwd: root,
+		encoding: "utf8",
+		env: { ...process.env, GITHUB_REPOSITORY: repository },
+	};
+	assert.equal(
+		JSON.parse(execFileSync(process.execPath, args, options)).revision,
+		revision,
 	);
-	assert.equal(result.revision, revision);
 	assert.match(readFileSync(join(root, "output"), "utf8"), /publish=true/);
 	writeFileSync(join(root, "releases.json"), "[]");
 	assert.equal(
-		JSON.parse(
-			execFileSync(process.execPath, args, { cwd: root, encoding: "utf8" }),
-		).publish,
+		JSON.parse(execFileSync(process.execPath, args, options)).publish,
 		false,
 	);
 	assert.match(
@@ -188,7 +183,7 @@ test("CLI resolves real lightweight and annotated git tags, and writes deferred 
 		/reason=published_release_not_found/,
 	);
 	assert.equal(
-		spawnSync(process.execPath, [script, "--help"], { cwd: root }).status,
+		spawnSync(process.execPath, [script, "--help"], options).status,
 		0,
 	);
 });

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
 	mkdirSync,
 	mkdtempSync,
@@ -27,6 +27,61 @@ const script = (name) =>
 		.split("\n")
 		.map((line) => line.replace(/^ {10}/, ""))
 		.join("\n");
+
+test("publication wakes on Development completion and rechecks live Actions evidence inside promotion", () => {
+	assert.match(
+		workflow,
+		/workflow_run:\n\s+workflows: \[Development\]\n\s+types: \[completed\]/,
+	);
+	assert.match(workflow, /actions: read/);
+	assert.doesNotMatch(
+		workflow,
+		/continuous-integration\/drone|commits\/.*\/status|statuses: read/,
+	);
+	assert.equal(
+		(
+			workflow.match(
+				/ci_state=\$\(node \.release-policy\/scripts\/verification\/release-ci-evidence\.mjs/g,
+			) ?? []
+		).length,
+		2,
+	);
+	const promotion = workflow.slice(workflow.indexOf("  publish:\n"));
+	assert.ok(
+		promotion.indexOf("release-ci-evidence.mjs \\") <
+			promotion.indexOf("- name: Publish the multi-architecture image"),
+	);
+	assert.match(
+		step("Verify selected release before promotion"),
+		/needs\.select\.outputs\.revision/,
+	);
+	assert.match(
+		step("Verify selected release before promotion"),
+		/needs\.select\.outputs\.release_tag/,
+	);
+});
+
+test("the actual promotion fence refuses a moved tag or selected revision", () => {
+	const env = {
+		...process.env,
+		EXPECTED_REVISION: "a".repeat(40),
+		EXPECTED_RELEASE_TAG: "v1.2.3",
+		REVISION: "a".repeat(40),
+		RELEASE_TAG: "v1.2.3",
+	};
+	for (const override of [
+		{},
+		{ REVISION: "b".repeat(40) },
+		{ RELEASE_TAG: "v1.2.4" },
+	]) {
+		const result = spawnSync(
+			"bash",
+			["-c", script("Verify selected release before promotion")],
+			{ env: { ...env, ...override }, encoding: "utf8" },
+		);
+		assert.equal(result.status === 0, Object.keys(override).length === 0);
+	}
+});
 
 test("publication queues every pending release and recovery steps also run for reused images", () => {
 	assert.match(

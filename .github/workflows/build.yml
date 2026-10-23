@@ -4,7 +4,9 @@ on:
   push:
     tags:
       - '*'
-  status:
+  workflow_run:
+    workflows: [Development]
+    types: [completed]
   release:
     types: [published]
   workflow_dispatch:
@@ -17,11 +19,11 @@ on:
 permissions:
   contents: write
   packages: write
-  statuses: read
+  actions: read
 
 jobs:
   select:
-    if: github.event_name != 'status' || (github.event.context == 'continuous-integration/drone/push' && github.event.state == 'success')
+    if: github.repository == 'icoretech/codex-pooler' && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-26.04
     outputs:
       ready: ${{ steps.publication.outputs.ready }}
@@ -79,9 +81,12 @@ jobs:
           sparse-checkout: |
             scripts/verification/release-publish-guard.mjs
             scripts/verification/release-publish-trigger.mjs
+            scripts/verification/release-ci-evidence.mjs
             test/scripts/release_publish_guard_test.mjs
             test/scripts/release_publish_trigger_test.mjs
             test/scripts/release_publish_workflow_test.mjs
+            test/scripts/release_publish_ci_test.mjs
+            test/scripts/support/release_ci_fixture.mjs
             test/scripts/support/registry_fetch_route.mjs
             .github/workflows/build.yml
           sparse-checkout-cone-mode: false
@@ -99,12 +104,12 @@ jobs:
           REVISION: ${{ steps.revision.outputs.sha }}
         run: |
           set -euo pipefail
-          gh api "repos/${GITHUB_REPOSITORY}/commits/${REVISION}/status" > "${RUNNER_TEMP}/release-status.json"
-          ci_state=$(jq -r '[.statuses[] | select(.context == "continuous-integration/drone/push")][0].state // "pending"' "${RUNNER_TEMP}/release-status.json")
+          ci_state=$(node .release-policy/scripts/verification/release-ci-evidence.mjs \
+            "$GITHUB_REPOSITORY" "$REVISION" "${RUNNER_TEMP}/release-ci.json")
           case "$ci_state" in
             success) ;;
             pending)
-              echo "Publication deferred - waiting for Drone on ${REVISION}" >> "$GITHUB_STEP_SUMMARY"
+              echo "Publication deferred - waiting for Development on ${REVISION}" >> "$GITHUB_STEP_SUMMARY"
               echo "ready=false" >> "$GITHUB_OUTPUT"
               exit 0 ;;
             *) echo "Required revision check failed: $ci_state"; exit 1 ;;
@@ -112,7 +117,7 @@ jobs:
           gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases?per_page=100" > "${RUNNER_TEMP}/release-list.json"
           node .release-policy/scripts/verification/release-publish-guard.mjs --registry "$RELEASE_TAG" "${RUNNER_TEMP}/registry-aliases.json"
           node .release-policy/scripts/verification/release-publish-guard.mjs \
-            "$RELEASE_TAG" "$REVISION" "${RUNNER_TEMP}/release-status.json" "${RUNNER_TEMP}/release-list.json" "${RUNNER_TEMP}/registry-aliases.json" "$GITHUB_OUTPUT"
+            "$RELEASE_TAG" "$REVISION" "${RUNNER_TEMP}/release-ci.json" "${RUNNER_TEMP}/release-list.json" "${RUNNER_TEMP}/registry-aliases.json" "$GITHUB_OUTPUT"
           echo "ready=true" >> "$GITHUB_OUTPUT"
 
   image:
@@ -257,9 +262,12 @@ jobs:
           sparse-checkout: |
             scripts/verification/release-publish-guard.mjs
             scripts/verification/release-publish-trigger.mjs
+            scripts/verification/release-ci-evidence.mjs
             test/scripts/release_publish_guard_test.mjs
             test/scripts/release_publish_trigger_test.mjs
             test/scripts/release_publish_workflow_test.mjs
+            test/scripts/release_publish_ci_test.mjs
+            test/scripts/support/release_ci_fixture.mjs
             test/scripts/support/registry_fetch_route.mjs
             .github/workflows/build.yml
           sparse-checkout-cone-mode: false
@@ -277,12 +285,12 @@ jobs:
           REVISION: ${{ steps.revision.outputs.sha }}
         run: |
           set -euo pipefail
-          gh api "repos/${GITHUB_REPOSITORY}/commits/${REVISION}/status" > "${RUNNER_TEMP}/release-status.json"
-          ci_state=$(jq -r '[.statuses[] | select(.context == "continuous-integration/drone/push")][0].state // "pending"' "${RUNNER_TEMP}/release-status.json")
+          ci_state=$(node .release-policy/scripts/verification/release-ci-evidence.mjs \
+            "$GITHUB_REPOSITORY" "$REVISION" "${RUNNER_TEMP}/release-ci.json")
           case "$ci_state" in
             success) ;;
             pending)
-              echo "Publication deferred - waiting for Drone on ${REVISION}" >> "$GITHUB_STEP_SUMMARY"
+              echo "Publication deferred - waiting for Development on ${REVISION}" >> "$GITHUB_STEP_SUMMARY"
               echo "ready=false" >> "$GITHUB_OUTPUT"
               exit 0 ;;
             *) echo "Required revision check failed: $ci_state"; exit 1 ;;
@@ -290,8 +298,22 @@ jobs:
           gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases?per_page=100" > "${RUNNER_TEMP}/release-list.json"
           node .release-policy/scripts/verification/release-publish-guard.mjs --registry "$RELEASE_TAG" "${RUNNER_TEMP}/registry-aliases.json"
           node .release-policy/scripts/verification/release-publish-guard.mjs \
-            "$RELEASE_TAG" "$REVISION" "${RUNNER_TEMP}/release-status.json" "${RUNNER_TEMP}/release-list.json" "${RUNNER_TEMP}/registry-aliases.json" "$GITHUB_OUTPUT"
+            "$RELEASE_TAG" "$REVISION" "${RUNNER_TEMP}/release-ci.json" "${RUNNER_TEMP}/release-list.json" "${RUNNER_TEMP}/registry-aliases.json" "$GITHUB_OUTPUT"
           echo "ready=true" >> "$GITHUB_OUTPUT"
+
+      - name: Verify selected release before promotion
+        if: steps.publication.outputs.ready == 'true'
+        env:
+          EXPECTED_REVISION: ${{ needs.select.outputs.revision }}
+          EXPECTED_RELEASE_TAG: ${{ needs.select.outputs.release_tag }}
+          REVISION: ${{ steps.revision.outputs.sha }}
+          RELEASE_TAG: ${{ steps.prepare.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          [[ "$REVISION" == "$EXPECTED_REVISION" && "$RELEASE_TAG" == "$EXPECTED_RELEASE_TAG" ]] || {
+            echo "Release identity changed after image selection"
+            exit 1
+          }
 
       - name: Set up Docker Buildx
         if: steps.publication.outputs.ready == 'true'

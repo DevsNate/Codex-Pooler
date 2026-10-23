@@ -9,14 +9,10 @@ import {
 	registryEvidence,
 	releasePublication,
 } from "../../scripts/verification/release-publish-guard.mjs";
+import { successEvidence } from "./support/release_ci_fixture.mjs";
 
 const sha = "a".repeat(40);
-const success = {
-	sha,
-	statuses: [
-		{ context: "continuous-integration/drone/push", state: "success" },
-	],
-};
+const success = successEvidence("icoretech/codex-pooler", sha);
 const absentAliases = {
 	versionTag: { state: "missing" },
 	latest: { state: "missing" },
@@ -74,20 +70,10 @@ test("unverified revisions and failed or missing required checks cannot publish"
 	const releases = [release("v0.10.0")];
 	for (const status of [
 		{ ...success, sha: "b".repeat(40) },
-		{ sha, statuses: [] },
-		{ sha, statuses: [{ context: "another-check", state: "success" }] },
-		{
-			sha,
-			statuses: [
-				{ context: "continuous-integration/drone/push", state: "pending" },
-			],
-		},
-		{
-			sha,
-			statuses: [
-				{ context: "continuous-integration/drone/push", state: "failure" },
-			],
-		},
+		{ ...success, jobs: [] },
+		{ ...success, workflow: { ...success.workflow, name: "Other" } },
+		{ ...success, run: { ...success.run, status: "in_progress" } },
+		{ ...success, run: { ...success.run, conclusion: "failure" } },
 	])
 		assert.throws(() => releasePublication("v0.10.0", sha, status, releases));
 });
