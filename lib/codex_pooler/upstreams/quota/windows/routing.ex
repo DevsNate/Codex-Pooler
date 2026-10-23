@@ -1000,6 +1000,24 @@ defmodule CodexPooler.Upstreams.Quota.Windows.Routing do
 
   defp exhausted_by_used_percent?(_window), do: false
 
+  # Routing's view only: account 5h and weekly windows also stop taking turns
+  # once less than `Evidence.routing_min_remaining_percent/0` remains. Cycle
+  # confirmation and provider-permission overrides keep asking
+  # `exhausted_by_used_percent?/1`, which still means exactly 100%.
+  defp routing_exhausted_by_used_percent?(%Quota.AccountQuotaWindow{quota_scope: scope, window_kind: kind, used_percent: %Decimal{} = used_percent} = window)
+       when scope in [nil, "account"] and kind in ["primary", "secondary"] do
+    case Evidence.routing_min_remaining_percent() do
+      floor when is_number(floor) and floor > 0 ->
+        limit = Decimal.sub(Decimal.new(100), Decimal.from_float(floor / 1))
+        exhausted_by_used_percent?(window) or Decimal.compare(used_percent, limit) != :lt
+
+      _none ->
+        exhausted_by_used_percent?(window)
+    end
+  end
+
+  defp routing_exhausted_by_used_percent?(window), do: exhausted_by_used_percent?(window)
+
   defp positive_credits?(%Quota.AccountQuotaWindow{credits: credits}) when is_integer(credits),
     do: credits > 0
 
@@ -1027,11 +1045,11 @@ defmodule CodexPooler.Upstreams.Quota.Windows.Routing do
        when is_integer(credits) and credits > 0 do
     if WindowClassifier.monthly_primary?(window),
       do: false,
-      else: exhausted_by_used_percent?(window)
+      else: routing_exhausted_by_used_percent?(window)
   end
 
   defp exhausted?(%Quota.AccountQuotaWindow{used_percent: %Decimal{}} = window) do
-    exhausted_by_used_percent?(window)
+    routing_exhausted_by_used_percent?(window)
   end
 
   defp exhausted?(%Quota.AccountQuotaWindow{active_limit: 0}), do: true
