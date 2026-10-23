@@ -8,10 +8,12 @@ defmodule CodexPooler.TestFileDurationsTest do
   @formatter TestFileDurations |> :code.which() |> List.to_string()
   @env "CODEX_POOLER_TEST_FILE_DURATIONS"
   @probe """
-  ExUnit.start(max_cases: 4)
+  ExUnit.start(max_cases: 4, autorun: false)
   :ok = CodexPooler.TestFileDurations.start!()
   IO.puts("formatters=" <> inspect(ExUnit.configuration()[:formatters]))
   for file <- System.argv(), do: Code.require_file(file)
+  result = ExUnit.run()
+  System.halt(if result.failures == 0, do: 0, else: 1)
   """
 
   # Stand-ins for ExUnit case modules: the formatter asks the module named by a TestModule for its `async` option.
@@ -112,7 +114,8 @@ defmodule CodexPooler.TestFileDurationsTest do
       assert sync_ms >= 190
       # one async and one sync module in the same file
       assert {mixed_sync, mixed_async} = parsed[Path.relative_to_cwd(files.mixed)]
-      assert mixed_sync >= 35 and mixed_async >= 55
+      assert mixed_sync >= 35, "mixed sync duration: #{mixed_sync} ms"
+      assert mixed_async >= 55, "mixed async duration: #{mixed_async} ms"
       assert {0, async_only} = parsed[Path.relative_to_cwd(files.async_only)]
       assert async_only >= 55
 
@@ -122,6 +125,89 @@ defmodule CodexPooler.TestFileDurationsTest do
       assert [sample] = CodexPooler.TestPartitionWeights.parse(File.read!(export))
       assert %{partition: nil, max_cases: 4, run_ms: ^run_ms, async_ms: ^async_ms} = sample
       assert sample.files == parsed
+    end
+
+    test "producer timestamps survive a suspended formatter and immediate suite shutdown", %{tmp_dir: dir} do
+      files = write_probe_files!(dir)
+      export = Path.join(dir, "suspended.tsv")
+
+      probe = """
+      ExUnit.start(max_cases: 4, autorun: false)
+      Process.register(self(), :duration_probe_controller)
+      defmodule DurationProbeObserver do
+        use GenServer
+        def init(_opts) do
+          [parent | _] = Process.get(:"$ancestors")
+          send(:duration_probe_controller, {:manager, parent})
+          {:ok, nil}
+        end
+        def handle_cast({:suite_started, _}, state) do
+          send(:duration_probe_controller, :suite_started)
+          {:noreply, state}
+        end
+        def handle_cast({:suite_finished, _}, state) do
+          send(:duration_probe_controller, :suite_finished)
+          {:noreply, state}
+        end
+        def handle_cast(_, state), do: {:noreply, state}
+      end
+      :ok = CodexPooler.TestFileDurations.start!()
+      ExUnit.configure(formatters: ExUnit.configuration()[:formatters] ++ [DurationProbeObserver])
+      for file <- System.argv(), do: Code.require_file(file)
+      independent = :trace.session_create(:independent_duration_probe, self(), [])
+      1 = :trace.function(independent, {ExUnit.EventManager, :module_finished, 2}, true, [:global])
+      :trace.process(independent, :all, true, [:call, :arity])
+      task = Task.async(fn -> ExUnit.run() end)
+      manager = receive do {:manager, pid} -> pid after 15_000 -> raise "manager missing" end
+      receive do :suite_started -> :ok after 15_000 -> raise "suite missing" end
+      blocked = receive do {:probe_ready, pid} -> pid after 15_000 -> raise "fixture missing" end
+      formatter = Enum.find_value(Supervisor.which_children(manager), fn {_, pid, _, _} ->
+        case :sys.get_state(pid) do
+          %{session: session, path: _} -> {pid, session}
+          _ -> nil
+        end
+      end)
+      {pid, session} = formatter
+      :ok = :sys.suspend(pid)
+      {:ok, other_manager} = ExUnit.EventManager.start_link()
+      unrelated = %ExUnit.TestModule{name: ProbeSyncCase, file: "unrelated_test.exs", parameters: %{}}
+      ExUnit.EventManager.module_started(other_manager, unrelated)
+      ExUnit.EventManager.module_finished(other_manager, unrelated)
+      ExUnit.EventManager.stop(other_manager)
+      send(blocked, :continue)
+      receive do :suite_finished -> :ok after 15_000 -> raise "completion missing" end
+      :ok = :sys.resume(pid)
+      %{failures: 0} = Task.await(task, 15_000)
+      false = :trace.session_destroy(session)
+      {:traced, :global} = :trace.info(independent, {ExUnit.EventManager, :module_finished, 2}, :traced)
+      true = :trace.session_destroy(independent)
+      IO.puts("suspended_formatter_flushed_and_destroyed")
+      """
+
+      # Hold the first async module before its body; both sync modules then execute entirely while the formatter is suspended.
+      File.write!(files.async_only, """
+      defmodule ProbeAsyncOnlyCase do
+        use ExUnit.Case, async: true
+        setup_all do
+          send(:duration_probe_controller, {:probe_ready, self()})
+          receive do :continue -> :ok after 15_000 -> raise "release missing" end
+        end
+        test "first", do: Process.sleep(30)
+        test "second", do: Process.sleep(30)
+      end
+      """)
+
+      assert {output, 0} = run_probe(dir, files, export, probe)
+      assert output =~ "Result: 5 passed"
+      assert output =~ "suspended_formatter_flushed_and_destroyed"
+      [_header | rows] = export |> File.read!() |> String.split("\n", trim: true)
+      parsed = Map.new(rows, &parse_row/1)
+      assert Enum.sort(Map.keys(parsed)) == files |> Map.values() |> Enum.map(&Path.relative_to_cwd/1) |> Enum.sort()
+      assert {sync_ms, 0} = parsed[Path.relative_to_cwd(files.sync)]
+      assert sync_ms >= 190
+      assert {mixed_sync, _mixed_async} = parsed[Path.relative_to_cwd(files.mixed)]
+      assert mixed_sync >= 35
+      refute File.exists?(export <> ".partial")
     end
 
     test "registers nothing and writes nothing when the variable is unset", %{tmp_dir: dir} do
@@ -162,7 +248,11 @@ defmodule CodexPooler.TestFileDurationsTest do
   end
 
   defp new_state do
-    {:ok, state} = TestFileDurations.init([{:codex_pooler_test_file_durations, %{path: "unused"}}, {:max_cases, 4}])
+    %{path: "unused", max_cases: 4, started: %{}, files: %{}}
+  end
+
+  defp cast(state, {event, %ExUnit.TestModule{name: name, file: file, parameters: parameters}}) when event in [:module_started, :module_finished] do
+    {:noreply, state} = TestFileDurations.handle_info({:trace_ts, self(), :call, {ExUnit.EventManager, event, 2}, {name, file, parameters}, System.monotonic_time(:nanosecond)}, state)
     state
   end
 
@@ -224,9 +314,9 @@ defmodule CodexPooler.TestFileDurationsTest do
     files
   end
 
-  defp run_probe(dir, files, export) do
+  defp run_probe(dir, files, export, source \\ @probe) do
     probe = Path.join(dir, "probe.exs")
-    File.write!(probe, @probe)
+    File.write!(probe, source)
 
     System.cmd("elixir", ["--erl", "+S 2:2", "-pa", Path.dirname(@formatter), probe | files |> Map.values() |> Enum.sort()],
       env: [{@env, export}],

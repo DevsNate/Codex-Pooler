@@ -3,7 +3,8 @@ defmodule CodexPooler.TestFileDurations do
   Records how long each test file takes in one ExUnit run.
 
   With `CODEX_POOLER_TEST_FILE_DURATIONS` naming a file, this formatter times every test module from its `module_started` to its
-  `module_finished` event. That is the module's wall time: `setup_all`, the tests with their `setup` blocks, every `on_exit` callback
+  `module_finished` event at the producer, using an isolated OTP trace session so formatter mailbox delays cannot change elapsed
+  time. That is the module's wall time: `setup_all`, the tests with their `setup` blocks, every `on_exit` callback
   and the module's teardown, where ExUnit's per-test `time` leaves `setup_all` and `on_exit` out. The module's time is added to its
   file's `sync_ms` or `async_ms` column according to the module's own `async` option, so a file holding both kinds of module has both.
 
@@ -58,34 +59,76 @@ defmodule CodexPooler.TestFileDurations do
   @impl true
   def init(opts) do
     %{path: path} = Keyword.fetch!(opts, @config_key)
-    {:ok, %{path: path, max_cases: Keyword.fetch!(opts, :max_cases), started: %{}, files: %{}}}
+    [parent | _] = Process.get(:"$ancestors")
+    session = start_trace!(parent)
+    {:ok, %{path: path, max_cases: Keyword.fetch!(opts, :max_cases), session: session, started: %{}, files: %{}}}
   end
 
   @impl true
-  def handle_cast({:module_started, %ExUnit.TestModule{} = module}, state) do
-    {:noreply, %{state | started: Map.put(state.started, module_key(module), System.monotonic_time(:microsecond))}}
-  end
-
-  def handle_cast({:module_finished, %ExUnit.TestModule{} = module}, state) do
-    finished = System.monotonic_time(:microsecond)
-
-    case Map.pop(state.started, module_key(module)) do
-      {nil, _started} ->
-        {:noreply, state}
-
-      {started, remaining} ->
-        column = if async?(module), do: :async, else: :sync
-        files = add_elapsed(state.files, Path.relative_to_cwd(module.file), column, finished - started)
-        {:noreply, %{state | started: remaining, files: files}}
-    end
-  end
-
   def handle_cast({:suite_finished, times_us}, state) do
+    # ExUnit stops its formatters immediately after this cast. Drain producer traces here, before that stop can overtake them.
+    state = drain_trace(state, :trace.delivered(state.session, :all))
     write(state, times_us)
     {:noreply, state}
   end
 
   def handle_cast(_event, state), do: {:noreply, state}
+
+  @impl true
+  def handle_info({:trace_ts, _pid, :call, {ExUnit.EventManager, event, 2}, identity, timestamp}, state) when event in [:module_started, :module_finished] do
+    {:noreply, record(state, event, identity, timestamp)}
+  end
+
+  @impl true
+  def terminate(_reason, state) do
+    :trace.session_destroy(state.session)
+    :ok
+  end
+
+  defp start_trace!(parent) do
+    Code.ensure_loaded!(ExUnit.EventManager)
+    session = :trace.session_create(__MODULE__, self(), [])
+
+    try do
+      # Copy only file identity, never the TestModule's tests, captured logs or failure payloads.
+      match = [{[{parent, :_}, %{name: :"$1", file: :"$2", parameters: :"$3"}], [], [{:message, {{:"$1", :"$2", :"$3"}}}]}]
+      1 = :trace.function(session, {ExUnit.EventManager, :module_started, 2}, match, [:global])
+      1 = :trace.function(session, {ExUnit.EventManager, :module_finished, 2}, match, [:global])
+      :trace.process(session, :all, true, [:call, :arity, :monotonic_timestamp])
+      session
+    catch
+      kind, reason ->
+        :trace.session_destroy(session)
+        :erlang.raise(kind, reason, __STACKTRACE__)
+    end
+  end
+
+  defp drain_trace(state, reference) do
+    receive do
+      {:trace_ts, _pid, :call, {ExUnit.EventManager, event, 2}, identity, timestamp} when event in [:module_started, :module_finished] ->
+        state |> record(event, identity, timestamp) |> drain_trace(reference)
+
+      {:trace_delivered, :all, ^reference} ->
+        state
+    end
+  end
+
+  defp record(state, :module_started, {name, _file, parameters}, timestamp) do
+    %{state | started: Map.put(state.started, {name, parameters}, timestamp)}
+  end
+
+  defp record(state, :module_finished, {name, file, parameters}, timestamp) do
+    case Map.pop(state.started, {name, parameters}) do
+      {nil, _started} ->
+        state
+
+      {started, remaining} ->
+        column = if async?(name), do: :async, else: :sync
+        elapsed = System.convert_time_unit(timestamp - started, :nanosecond, :microsecond)
+        files = add_elapsed(state.files, Path.relative_to_cwd(file), column, elapsed)
+        %{state | started: remaining, files: files}
+    end
+  end
 
   @doc false
   @spec render(%{max_cases: pos_integer(), files: %{String.t() => %{sync: non_neg_integer(), async: non_neg_integer()}}}, %{run: non_neg_integer(), async: non_neg_integer() | nil}) :: iodata()
@@ -111,11 +154,8 @@ defmodule CodexPooler.TestFileDurations do
     Map.update(files, path, Map.put(%{sync: 0, async: 0}, column, elapsed), &Map.update!(&1, column, fn total -> total + elapsed end))
   end
 
-  # Parameterized modules run the same module once per parameter set.
-  defp module_key(%ExUnit.TestModule{name: name, parameters: parameters}), do: {name, parameters}
-
   # ExUnit registers every test module through this same call (`ExUnit.Case.__after_compile__/2`).
-  defp async?(%ExUnit.TestModule{name: name}) do
+  defp async?(name) do
     function_exported?(name, :__ex_unit__, 1) and match?(%{async?: true}, name.__ex_unit__(:config))
   end
 
