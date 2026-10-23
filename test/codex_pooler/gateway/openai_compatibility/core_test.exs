@@ -4863,6 +4863,47 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
       end
     end
 
+    for {label, name} <- [
+          {"a dot", "catalog.lookup"},
+          {"an embedded space", "lookup item"},
+          {"leading whitespace", " lookup"},
+          {"trailing whitespace", "lookup "},
+          {"a line break", "lookup\n"},
+          {"Unicode", "lookup_\u00E9"},
+          {"129 ASCII characters", String.duplicate("a", 129)}
+        ],
+        layout <- [:flat, :namespace] do
+      test "a #{layout} function name with #{label} is rejected without rewriting it" do
+        function = flat_function_tool(unquote(name), %{"type" => "object", "properties" => %{}}, false)
+        tools = if unquote(layout) == :flat, do: [function], else: [%{"type" => "namespace", "name" => "catalog", "description" => "Synthetic functions", "tools" => [function]}]
+        assert {:error, %{status: 400, code: "invalid_request", param: "tools", message: "function tool names must contain 1 to 128 ASCII letters, digits, underscores or hyphens"}} = Responses.coerce(%{"model" => "gpt-fixture-text", "input" => "synthetic input", "tools" => tools})
+      end
+    end
+
+    test "function names preserve exact spelling and named choices through the 128-character boundary" do
+      for name <- ["a", "LOOKUP_01-a", String.duplicate("a", 64), String.duplicate("a", 65), String.duplicate("a", 128)] do
+        function = flat_function_tool(name, %{"type" => "object", "properties" => %{}}, false)
+        choice = %{"type" => "function", "name" => name}
+        assert {:ok, result} = Responses.coerce(%{"model" => "gpt-fixture-text", "input" => "synthetic input", "tools" => [function], "tool_choice" => choice})
+        assert result.payload["tools"] == [function]
+        assert result.payload["tool_choice"] == choice
+      end
+    end
+
+    test "translated Chat function names use the same provider constraint without aliases" do
+      name = String.duplicate("a", 128)
+      function = %{"name" => name, "parameters" => %{"type" => "object", "properties" => %{}}}
+      payload = %{"model" => "gpt-fixture-text", "messages" => [%{"role" => "user", "content" => "synthetic"}], "tools" => [%{"type" => "function", "function" => function}], "tool_choice" => %{"type" => "function", "function" => %{"name" => name}}}
+      assert {:ok, result} = Chat.coerce(payload)
+      assert [%{"name" => ^name}] = result.payload["tools"]
+      assert result.payload["tool_choice"] == %{"type" => "function", "name" => name}
+
+      for invalid <- ["catalog.lookup", String.duplicate("a", 129)] do
+        tools = [%{"type" => "function", "function" => %{function | "name" => invalid}}]
+        assert {:error, %{code: "invalid_request", param: "tools"}} = Chat.coerce(Map.put(payload, "tools", tools))
+      end
+    end
+
     test "exact executable names remain case and whitespace sensitive for collision and choice resolution" do
       tools = [
         flat_function_tool("lookup", %{}, nil),

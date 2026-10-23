@@ -588,6 +588,12 @@ function in another namespace. Custom tool names remain globally unique
 across all executable tools, and namespace container names must be unique.
 Responses JSON, SSE and websocket output preserve the function's namespace,
 name and argument string; argument parsing belongs to the client SDK.
+Ordinary function names, including namespace children, must contain 1 to 128
+ASCII letters, digits, underscores or hyphens. Dots, whitespace, Unicode and
+longer names return `400 invalid_request` on `tools` before dispatch.
+Valid names and named function choices keep their exact spelling; Codex Pooler
+does not create aliases for unsupported names.
+Translated Chat function declarations use the same guard after conversion.
 A top-level `tool_search` tool is accepted, see
 [OpenAI-compatible SDKs](/clients/openai-compatible/#tool-search-with-deferred-tools).
 

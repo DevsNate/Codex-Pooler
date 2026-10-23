@@ -18,6 +18,7 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses do
   @reasoning_summaries ~w(auto concise detailed)
   @service_tiers ~w(auto default flex priority scale ultrafast)
   @truncation_modes ~w(auto disabled)
+  @function_tool_name_pattern ~r/\A[A-Za-z0-9_-]{1,128}\z/
   # The type-only built-ins an `allowed_tools` choice may name (Full only). `programmatic_tool_calling` and
   # `web_search_preview` left on 2026-10-06: the Codex backend refuses both tool types on a Full request (findings#333).
   @allowed_tools_builtin_types ~w(web_search image_generation)
@@ -799,6 +800,7 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses do
            ]),
          :ok <-
            validate_nonblank_tool_field(tool, "name", "function tool requires a non-empty name"),
+         :ok <- validate_function_tool_name(name),
          :ok <- validate_optional_boolean_tool_field(tool, "strict"),
          :ok <- validate_optional_boolean_tool_field(tool, "defer_loading"),
          :ok <- validate_optional_allowed_callers(tool) do
@@ -813,6 +815,12 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses do
 
   defp validate_function_tool(_tool),
     do: {:error, Error.invalid_request("function tool requires flat name and parameters", "tools")}
+
+  defp validate_function_tool_name(name) do
+    if Regex.match?(@function_tool_name_pattern, name),
+      do: :ok,
+      else: {:error, Error.invalid_request("function tool names must contain 1 to 128 ASCII letters, digits, underscores or hyphens", "tools")}
+  end
 
   defp validate_custom_tool(tool) do
     with :ok <-
