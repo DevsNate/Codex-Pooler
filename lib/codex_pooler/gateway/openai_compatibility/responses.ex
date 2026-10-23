@@ -611,21 +611,27 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses do
   end
 
   defp validate_unique_tool_names(tools) do
-    executable_names = executable_tool_names(tools)
+    executable_keys = executable_tool_keys(tools)
     namespace_names = namespace_tool_names(tools)
+    custom_names = MapSet.new(custom_tool_names(%{"tools" => tools}))
 
-    if duplicate_name?(executable_names) or duplicate_name?(namespace_names),
+    ambiguous_custom_name? =
+      executable_keys
+      |> Enum.frequencies_by(fn {_namespace, name} -> name end)
+      |> Enum.any?(fn {name, count} -> count > 1 and MapSet.member?(custom_names, name) end)
+
+    if duplicate_name?(executable_keys) or duplicate_name?(namespace_names) or ambiguous_custom_name?,
       do: {:error, Error.invalid_request("tool names must be unique", "tools")},
       else: :ok
   end
 
-  defp executable_tool_names(tools) do
+  defp executable_tool_keys(tools) do
     Enum.flat_map(tools, fn
       %{"type" => type, "name" => name} when type in ["function", "custom"] ->
-        [name]
+        [{nil, name}]
 
-      %{"type" => "namespace", "tools" => namespace_tools} ->
-        Enum.map(namespace_tools, &Map.fetch!(&1, "name"))
+      %{"type" => "namespace", "name" => namespace, "tools" => namespace_tools} ->
+        Enum.map(namespace_tools, &{namespace, Map.fetch!(&1, "name")})
 
       _tool ->
         []

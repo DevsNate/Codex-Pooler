@@ -4816,7 +4816,7 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
       refute match?({:ok, %{payload: _payload}}, result)
     end
 
-    test "executable tools and namespace containers reject exact name collisions before choice lookup" do
+    test "same-scope executable names, custom names and namespace containers reject collisions before choice lookup" do
       function = fn name -> flat_function_tool(name, %{}, nil) end
       custom = fn name -> %{"type" => "custom", "name" => name} end
 
@@ -4834,10 +4834,10 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
         {"duplicate custom tools", [custom.("shared"), custom.("shared")]},
         {"duplicate namespace containers", [namespace.("shared_namespace", ["first"]), namespace.("shared_namespace", ["second"])]},
         {"duplicate children in one namespace", [namespace.("first_namespace", ["shared", "shared"])]},
-        {"duplicate children across namespaces", [namespace.("first_namespace", ["shared"]), namespace.("second_namespace", ["shared"])]},
         {"function and custom", [function.("shared"), custom.("shared")]},
-        {"function and namespace child", [function.("shared"), namespace.("fixture_namespace", ["shared"])]},
-        {"custom and namespace child", [custom.("shared"), namespace.("fixture_namespace", ["shared"])]}
+        {"custom and namespace function", [custom.("shared"), namespace.("fixture_namespace", ["shared"])]},
+        {"function and namespace custom", [function.("shared"), %{namespace.("fixture_namespace", []) | "tools" => [custom.("shared")]}]},
+        {"customs across namespaces", [%{namespace.("first_namespace", []) | "tools" => [custom.("shared")]}, %{namespace.("second_namespace", []) | "tools" => [custom.("shared")]}]}
       ]
 
       Enum.each(collision_cases, fn {_label, tools} ->
@@ -4849,6 +4849,18 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
                    "tool_choice" => %{"type" => "function", "name" => "missing_fixture"}
                  })
       end)
+    end
+
+    test "function names resolve within their declared namespace without changing schemas or tool order" do
+      top = flat_function_tool("shared", %{"type" => "object", "properties" => %{"count" => %{"type" => "number"}}}, false)
+      nested = flat_function_tool("shared", %{"type" => "object", "properties" => %{"item_id" => %{"type" => "string"}}}, false)
+      first = %{"type" => "namespace", "name" => "catalog", "description" => "Synthetic catalog functions", "tools" => [nested]}
+      second = %{first | "name" => "inventory"}
+
+      for tools <- [[top, first], [first, top], [first, second], [top, first, second]] do
+        assert {:ok, result} = Responses.coerce(%{"model" => "gpt-fixture-text", "input" => "synthetic input", "tools" => tools})
+        assert result.payload["tools"] == tools
+      end
     end
 
     test "exact executable names remain case and whitespace sensitive for collision and choice resolution" do

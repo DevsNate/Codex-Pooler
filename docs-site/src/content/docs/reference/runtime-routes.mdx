@@ -581,10 +581,14 @@ namespace accepts the same flat `function` and exact `custom` children. A custom
 tool requires `type: "custom"` and a nonblank `name`. It may include a
 description, boolean `defer_loading` or `async`, nullable `allowed_callers` using `direct`
 or `programmatic`, and omitted, unconstrained text, or a `lark`/`regex` grammar
-format. Hosted, MCP, nested-namespace, malformed, and duplicate
-executable-name shapes are rejected, and so is a `tool_search` tool inside a
-namespace; executable names must be globally unique across top-level and
-namespace children. A top-level `tool_search` tool is accepted, see
+format. Hosted, MCP, nested-namespace, malformed, and duplicate names within
+the same namespace are rejected, and so is a `tool_search` tool inside a
+namespace. A function can share its name with a top-level function or a
+function in another namespace. Custom tool names remain globally unique
+across all executable tools, and namespace container names must be unique.
+Responses JSON, SSE and websocket output preserve the function's namespace,
+name and argument string; argument parsing belongs to the client SDK.
+A top-level `tool_search` tool is accepted, see
 [OpenAI-compatible SDKs](/clients/openai-compatible/#tool-search-with-deferred-tools).
 
 A typed custom `tool_choice` resolves only a declared same-kind custom tool with
