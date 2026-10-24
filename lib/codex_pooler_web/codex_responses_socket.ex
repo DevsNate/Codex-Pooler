@@ -15,6 +15,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   alias CodexPooler.Gateway.Runtime.DuplicateTurnTelemetry
   alias CodexPooler.Gateway.Runtime.NativeResponseSteering
   alias CodexPooler.Gateway.Runtime.Service
+  alias CodexPooler.Gateway.Runtime.SessionLeaseHeartbeat
   alias CodexPooler.Gateway.Transports.Streaming.PreparedWebsocketFrame
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.ErrorCodes
@@ -171,12 +172,23 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
         |> initialize_revocation_state()
 
       {:ok, %{codex_session: session, upstream_websocket_session: upstream_websocket_session}} ->
-        state
-        |> put_socket_lifecycle_state()
-        |> put_response_task_state()
-        |> Map.put(:codex_session, session)
-        |> Map.put(:upstream_websocket_session, upstream_websocket_session)
-        |> initialize_revocation_state()
+        case Websocket.start_websocket_session_heartbeat(session, state.opts) do
+          {:ok, heartbeat} ->
+            heartbeat_monitor = Process.monitor(heartbeat)
+
+            state
+            |> put_socket_lifecycle_state()
+            |> put_response_task_state()
+            |> Map.put(:codex_session, session)
+            |> Map.put(:upstream_websocket_session, upstream_websocket_session)
+            |> Map.put(:session_lease_heartbeat, heartbeat)
+            |> Map.put(:session_lease_heartbeat_monitor, heartbeat_monitor)
+            |> initialize_revocation_state()
+
+          {:error, reason} ->
+            :ok = UpstreamWebsocketSession.close(upstream_websocket_session)
+            init_error(reason, state, started_at)
+        end
 
       {:error, reason} ->
         init_error(reason, state, started_at)
@@ -720,6 +732,13 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
     end
   end
 
+  defp handle_socket_info(
+         {:DOWN, ref, :process, pid, _reason},
+         %{session_lease_heartbeat_monitor: ref, session_lease_heartbeat: pid} = state
+       ) do
+    {:stop, :normal, {1011, "websocket session lease unavailable"}, state}
+  end
+
   defp handle_socket_info({:DOWN, ref, :process, pid, _reason}, state) do
     result =
       cond do
@@ -927,6 +946,8 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   def terminate(reason, state) do
     _result = WebsocketControlPath.run(:terminate, fn -> terminate_socket(reason, state) end)
     :ok
+  after
+    stop_local_session_lease_heartbeat(state)
   end
 
   defp terminate_socket(reason, state) do
@@ -6897,6 +6918,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
         ref: ref,
         parent: parent,
         session_id: state.codex_session.id,
+        session_owner_lease_token: Map.get(state.codex_session, :owner_lease_token),
         owner_binding: pre_attempt_owner_binding(state),
         owner_pid: Map.get(state, :websocket_owner_pid),
         before_ready:
@@ -7306,5 +7328,13 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
     state
     |> Map.get(:upstream_websocket_session)
     |> Websocket.close_websocket_session()
+  end
+
+  defp stop_local_session_lease_heartbeat(state) do
+    monitor = Map.get(state, :session_lease_heartbeat_monitor)
+    heartbeat = Map.get(state, :session_lease_heartbeat)
+
+    if is_reference(monitor), do: Process.demonitor(monitor, [:flush])
+    SessionLeaseHeartbeat.stop(heartbeat)
   end
 end

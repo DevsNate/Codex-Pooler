@@ -46,7 +46,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.InterruptionTelemetryTest do
 
   test "cleanup worker emits each expired-owner interruption after commit exactly once" do
     fixtures =
-      for mode <- [:active_attempt, :legacy_attempt, :without_attempt] do
+      for mode <- [:active_attempt, :without_attempt] do
         fixture = committed_interruption_fixture!(mode)
         expire_owner!(fixture)
         fixture
@@ -69,18 +69,43 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.InterruptionTelemetryTest do
         assert committed_interruption_state(fixture).turn_status == "interrupted"
       end
 
-      [dead, legacy, _unattempted] = fixtures
+      [dead, _unattempted] = fixtures
 
       assert run_unboxed(fn -> Repo.get!(Request, dead.request.id).last_error_code end) ==
                "dead_execution_recovered"
-
-      assert run_unboxed(fn -> Repo.get!(Request, legacy.request.id).last_error_code end) ==
-               "owner_unavailable"
 
       refute_received {:stream_outcome, _}
       assert run_unboxed(fn -> perform_job(RuntimeStateCleanupWorker, %{}) end) == :ok
       refute_received {:stream_outcome, _}
     end)
+  end
+
+  test "cleanup worker emits nothing for an expired legacy executor without durable authority" do
+    fixture = committed_interruption_fixture!(:legacy_attempt)
+    expire_owner!(fixture)
+
+    before =
+      run_unboxed(fn ->
+        {Repo.get!(Request, fixture.request.id), Repo.get!(Attempt, fixture.attempt.id), Repo.get!(CodexTurn, fixture.turn.id), Repo.get!(CodexSession, fixture.session.id), Repo.get_by!(BridgeOwnerLease, codex_session_id: fixture.session.id), Repo.all(from e in LedgerEntry, where: e.request_id == ^fixture.request.id, order_by: e.id)}
+      end)
+
+    capture_outcomes(fn ->
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:error, {:runtime_state_cleanup_steps_failed, [:gateway_runtime], summary}} = run_unboxed(fn -> perform_job(RuntimeStateCleanupWorker, %{}) end)
+          assert summary.expired_owner_sessions_failed == 1
+          assert summary.expired_owner_sessions_recovered == 0
+        end)
+
+      assert log =~ ":owner_unavailable"
+      refute_received {:stream_outcome, _}
+      refute_received {:stream_outcome_transaction, _}
+    end)
+
+    assert before ==
+             run_unboxed(fn ->
+               {Repo.get!(Request, fixture.request.id), Repo.get!(Attempt, fixture.attempt.id), Repo.get!(CodexTurn, fixture.turn.id), Repo.get!(CodexSession, fixture.session.id), Repo.get_by!(BridgeOwnerLease, codex_session_id: fixture.session.id), Repo.all(from e in LedgerEntry, where: e.request_id == ^fixture.request.id, order_by: e.id)}
+             end)
   end
 
   test "cleanup worker recovery inside a rolled-back caller transaction emits nothing" do
@@ -353,6 +378,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.InterruptionTelemetryTest do
     # rollback" and its error tuple was loose enough to agree with anything.
     # findings#195 row 195-127, the same class as 195-103 one test over.
     fixture = committed_interruption_fixture!(:accounting_failure)
+    CodexPooler.ExecutionProofSupport.publish_committed_terminal!(fixture.attempt)
     expire_owner!(fixture)
 
     capture_outcomes(fn ->

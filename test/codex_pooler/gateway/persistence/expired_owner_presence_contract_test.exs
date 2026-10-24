@@ -1,6 +1,6 @@
 defmodule CodexPooler.Gateway.Persistence.ExpiredOwnerPresenceContractTest do
   # Session expiry is independent of VM liveness: a fresh VM heartbeat cannot
-  # renew an expired per-session lease or shelter that lease's active turn.
+  # renew an expired per-session lease or shelter an executor proven ended.
   use CodexPooler.DataCase, async: false
 
   import CodexPooler.PoolerFixtures
@@ -40,13 +40,12 @@ defmodule CodexPooler.Gateway.Persistence.ExpiredOwnerPresenceContractTest do
         request_metadata: %{"codex_session_id" => session.id}
       })
 
-    attempt =
-      attempt_fixture(request, assignment, %{
-        status: "in_progress",
-        completed_at: nil,
-        usage_status: "usage_pending",
-        response_metadata: %{}
-      })
+    task = Task.async(fn -> receive do: (:create -> CodexPooler.Accounting.create_attempt(request, assignment)) end)
+    monitor = Process.monitor(task.pid)
+    send(task.pid, :create)
+    assert {:ok, attempt} = Task.await(task, 15_000)
+    assert_receive {:DOWN, ^monitor, :process, _, :normal}, 15_000
+    CodexPooler.ExecutionProofSupport.publish_terminal!(attempt)
 
     turn = turn_fixture(session, request, attempt, now)
 
@@ -77,7 +76,7 @@ defmodule CodexPooler.Gateway.Persistence.ExpiredOwnerPresenceContractTest do
     assert summary.expired_owner_sessions_recovered == 1
     assert Repo.get!(CodexTurn, turn.id).status == "interrupted"
     assert Repo.get!(Request, request.id).status == "failed"
-    assert Repo.get!(Request, request.id).last_error_code == "owner_unavailable"
+    assert Repo.get!(Request, request.id).last_error_code == "dead_execution_recovered"
     assert Repo.get!(BridgeOwnerLease, expired_lease.id).status == "expired"
     assert Repo.get!(CodexSession, session.id).status == "interrupted"
   end

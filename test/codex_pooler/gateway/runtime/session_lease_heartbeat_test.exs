@@ -103,12 +103,28 @@ defmodule CodexPooler.Gateway.Runtime.SessionLeaseHeartbeatTest do
     assert :ok = SessionLeaseHeartbeat.stop(heartbeat)
   end
 
-  test "starts only for an attached HTTP owner witness" do
+  test "request-scoped renewal excludes websockets while socket-scoped renewal includes them" do
     %{session: session, token: token} = owner_session_fixture()
     request_options = http_request_options(session, token)
 
-    assert :ignore =
-             SessionLeaseHeartbeat.start(RequestOptions.put_transport(request_options, transport: "websocket"))
+    websocket_options = RequestOptions.put_transport(request_options, transport: "websocket")
+    assert :ignore = SessionLeaseHeartbeat.start(websocket_options)
+    assert {:ok, websocket_heartbeat} = SessionLeaseHeartbeat.start_websocket(websocket_options)
+
+    assert :ok = SessionLeaseHeartbeat.stop(websocket_heartbeat)
+
+    expire_owner_lease!(session.id)
+    before_session = Repo.get!(CodexSession, session.id)
+
+    assert :dispatched =
+             SessionLeaseHeartbeat.run(websocket_options, fn heartbeat, unchanged ->
+               assert heartbeat == nil
+               assert unchanged == websocket_options
+               :dispatched
+             end)
+
+    assert Repo.get!(CodexSession, session.id) == before_session
+    assert :ignore = SessionLeaseHeartbeat.start_websocket(request_options)
 
     assert :ignore =
              SessionLeaseHeartbeat.start(RequestOptions.put_continuity(request_options, codex_session: nil))

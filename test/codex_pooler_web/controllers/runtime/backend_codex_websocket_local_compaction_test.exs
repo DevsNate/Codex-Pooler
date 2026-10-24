@@ -38,9 +38,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketLocalCompactionTest do
 
   alias CodexPooler.Accounting.{Request, RequestClientRetryLink}
   alias CodexPooler.FakeUpstream
-  alias CodexPooler.Gateway.Persistence.CodexSession
+  alias CodexPooler.Gateway.Persistence.{BridgeOwnerLease, CodexSession}
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
   alias CodexPooler.Repo
+  alias CodexPoolerWeb.Runtime.MailboxLeaseLifecycleSupport
   alias CodexPoolerWeb.Runtime.WebsocketCleanupFence
   alias CodexPoolerWeb.WebsocketConnectionLogger
 
@@ -198,6 +199,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketLocalCompactionTest do
     assert %{"type" => "response.completed"} = List.last(opener)
     assert_request_finalized!(first, "succeeded")
     binding = owner_binding(first, owner_reader)
+    :ok = pause_owner_renewal!(binding)
 
     # The client's summarization request, on a new websocket. While the
     # provider holds its answer, and after the client dropped that websocket,
@@ -206,6 +208,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketLocalCompactionTest do
     second = send_frame!(second, summary_frame(turn))
     assert_receive {:fake_upstream_frame_barrier, 0, _handler, ^summary_hold}, @detection_timeout_ms
     assert owner_binding(first, owner_reader) == binding
+    heartbeat = assert_compaction_renews_lease!(second, binding)
     :ok = FakeUpstream.release_remaining_frames(upstream, summary_hold)
     {second, summary} = receive_turn!(second)
     assert_receive {:fake_upstream_frame_barrier, 3, _handler, ^summary_hold}, @detection_timeout_ms
@@ -214,7 +217,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketLocalCompactionTest do
 
     # The client drops the compaction's session, and its websocket with it:
     # nothing of that reaches the turn's socket.
+    assert_compaction_heartbeat_alive!(heartbeat)
     {:ok, drop_log} = with_info_log(fn -> drop!(second) end)
+    assert_compaction_heartbeat_stopped!(heartbeat)
     assert_turn_socket_untouched!(first, drop_log)
     assert owner_binding(first, owner_reader) == binding
 
@@ -406,6 +411,83 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketLocalCompactionTest do
   # the owner's lease and downstream binding. Nil without owner forwarding.
   defp owner_reader(:off), do: nil
   defp owner_reader(:on), do: :local
+
+  defp pause_owner_renewal!(nil), do: :ok
+
+  defp pause_owner_renewal!(%{owner: owner}) do
+    # Keep the primary owner responsive and attached. The shared helper
+    # cancels its timer and drains an already delivered tick inside the owner,
+    # then restores its schedule once during teardown.
+    await_owner_idle!(owner, System.monotonic_time(:millisecond) + @detection_timeout_ms)
+    MailboxLeaseLifecycleSupport.suppress_owned_idle_renewal!(owner)
+  end
+
+  defp await_owner_idle!(owner, deadline) do
+    case :sys.get_state(owner, @detection_timeout_ms) do
+      %{active_turn: nil} ->
+        :ok
+
+      _state ->
+        assert System.monotonic_time(:millisecond) < deadline, "primary owner did not finish the opener"
+
+        receive do
+        after
+          5 -> await_owner_idle!(owner, deadline)
+        end
+    end
+  end
+
+  defp assert_compaction_renews_lease!(_client, nil), do: nil
+
+  defp assert_compaction_renews_lease!(client, %{owner: owner, lease: token}) do
+    state = socket_connection_state!(client.socket)
+    assert is_nil(Map.get(state, :websocket_owner_pid))
+    heartbeat = Map.get(state, :session_lease_heartbeat)
+    assert is_pid(heartbeat)
+    monitor = Process.monitor(heartbeat)
+
+    %{caller_pid: caller, session_id: session_id, renewal_token: renewal_token, renewal_ref: timer} =
+      :sys.replace_state(heartbeat, fn state ->
+        Process.cancel_timer(state.renewal_ref)
+        token = state.renewal_token
+
+        receive do
+          {:session_lease_heartbeat_renew, ^token} -> :ok
+        after
+          0 -> :ok
+        end
+
+        state
+      end)
+
+    assert caller == client.socket
+    assert session_id == state.codex_session.id
+    assert is_reference(renewal_token)
+    assert is_reference(timer)
+    before_renewal = Repo.get!(CodexSession, session_id)
+
+    # Deliver the actual scheduled message while the provider holds the
+    # summary. The persisted renewal uses the real shared database boundary.
+    send(heartbeat, {:session_lease_heartbeat_renew, renewal_token})
+    assert %{renewal_token: next_token} = :sys.get_state(heartbeat)
+    assert next_token != renewal_token
+    session = Repo.get!(CodexSession, session_id)
+    lease = Repo.one!(from lease in BridgeOwnerLease, where: lease.codex_session_id == ^session_id and lease.lease_token == ^token)
+    assert DateTime.compare(session.owner_lease_expires_at, before_renewal.owner_lease_expires_at) == :gt
+    assert session.owner_lease_expires_at == lease.expires_at
+    assert session.owner_lease_token == token
+    assert %{owner_renewal_ms: 0, owner_renewal_ref: nil} = :sys.get_state(owner, @detection_timeout_ms)
+    {heartbeat, monitor}
+  end
+
+  defp assert_compaction_heartbeat_stopped!(nil), do: :ok
+
+  defp assert_compaction_heartbeat_stopped!({heartbeat, monitor}) do
+    assert_receive {:DOWN, ^monitor, :process, ^heartbeat, :normal}, @detection_timeout_ms
+  end
+
+  defp assert_compaction_heartbeat_alive!(nil), do: :ok
+  defp assert_compaction_heartbeat_alive!({heartbeat, _monitor}), do: assert(Process.alive?(heartbeat))
 
   defp owner_binding(_client, nil), do: nil
 

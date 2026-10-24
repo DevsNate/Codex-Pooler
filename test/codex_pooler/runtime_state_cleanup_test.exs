@@ -98,7 +98,7 @@ defmodule CodexPooler.RuntimeStateCleanupTest do
   end
 
   @tag :replay_lock_order
-  test "cleanup interrupts in-progress turns before expiring owner leases" do
+  test "cleanup preserves in-progress HTTP turns while expiring owner leases" do
     now = ~U[2026-05-03 03:15:00Z]
     expired_at = DateTime.add(now, -1, :second)
     %{pool: pool, api_key: api_key} = active_api_key_fixture()
@@ -111,7 +111,7 @@ defmodule CodexPooler.RuntimeStateCleanupTest do
       request_fixture(%{pool: pool, api_key: api_key}, %{
         model_id: model.id,
         requested_model: model.exposed_model_id,
-        transport: "websocket",
+        transport: "http_sse",
         status: "in_progress",
         usage_status: "usage_pending",
         completed_at: nil,
@@ -149,44 +149,32 @@ defmodule CodexPooler.RuntimeStateCleanupTest do
     assert summary.expired_owner_sessions_recovered == 1
     assert summary.expired_owner_leases == 1
 
-    assert %Request{
-             status: "failed",
-             usage_status: "usage_unknown",
-             response_status_code: 499,
-             last_error_code: "owner_unavailable"
-           } = Repo.reload!(request)
-
-    assert %Attempt{
-             status: "failed",
-             usage_status: "usage_unknown",
-             network_error_code: "owner_unavailable"
-           } = Repo.reload!(attempt)
-
-    assert %CodexTurn{status: "interrupted", error_code: "owner_unavailable"} =
-             Repo.reload!(turn)
+    assert Repo.reload!(request).status == "in_progress"
+    assert Repo.reload!(attempt).status == "in_progress"
+    assert Repo.reload!(turn).status == "in_progress"
 
     assert Repo.reload!(expired_lease).status == "expired"
 
-    assert Enum.map(ledger_entries_for_request(request.id), & &1.entry_kind) |> Enum.sort() == [
-             "release",
-             "reservation",
-             "settlement"
-           ]
+    assert Enum.map(ledger_entries_for_request(request.id), & &1.entry_kind) == ["reservation"]
   end
 
-  for binding <- [:malformed_forwarding, :historical_marker, :older_active_request] do
+  for binding <- [:direct_executor, :malformed_forwarding, :historical_marker, :older_active_request] do
     test "SQL-only expiry revalidates #{binding} after discovery before interruption" do
       now = DateTime.utc_now()
       %{pool: pool, api_key: api_key} = active_api_key_fixture()
       %{assignment: assignment} = upstream_assignment_fixture(pool)
       session = session_fixture(pool, api_key, assignment, DateTime.add(now, -60, :second))
       request = request_fixture(%{pool: pool, api_key: api_key}, %{transport: "websocket", status: "in_progress", completed_at: nil, request_metadata: %{"codex_session_id" => session.id}})
-      attempt = attempt_fixture(request, assignment, %{status: "in_progress", completed_at: nil, response_metadata: %{}})
+      attempt = attempt_fixture(request, assignment, %{transport: "http_sse", status: "in_progress", completed_at: nil, response_metadata: %{}})
       turn = turn_fixture(session, request, attempt, now)
       candidate = %{session_id: session.id, owner_instance_id: session.owner_instance_id, owner_lease_token: session.owner_lease_token, owner_lease_expires_at: session.owner_lease_expires_at, sql_only_expiry: true}
       refute Interruption.physical_expiry_stop_required?(session.id)
+      attempt |> Ecto.Changeset.change(transport: "websocket") |> Repo.update!()
 
       case unquote(binding) do
+        :direct_executor ->
+          :ok
+
         :historical_marker ->
           attempt |> Ecto.Changeset.change(response_metadata: %{"expired_owner_stop" => %{"version" => 99}}) |> Repo.update!()
           attempt_fixture(request, assignment, %{attempt_number: 2, transport: "http_sse", status: "in_progress", completed_at: nil, response_metadata: %{}})
@@ -210,7 +198,7 @@ defmodule CodexPooler.RuntimeStateCleanupTest do
     end
   end
 
-  for execution_state <- [:dead, :scanner_first, :entitled, :alive, :unknown] do
+  for execution_state <- [:dead, :scanner_first, :entitled, :alive, :unknown, :unpublished, :alive_dead_owner, :legacy] do
     test "expired owner preserves exact #{execution_state} execution classification" do
       now = ~U[2026-05-03 03:15:00.000000Z]
       expired_at = DateTime.add(now, -1, :second)
@@ -267,43 +255,46 @@ defmodule CodexPooler.RuntimeStateCleanupTest do
 
       assert_receive {:execution_identity, pid, attempt}, 15_000
       owner = InstancePresence.local_identity()
+      lease_boot_id = if unquote(execution_state) == :alive_dead_owner, do: Ecto.UUID.generate(), else: owner.boot_id
 
       session =
         session
         |> Ecto.Changeset.change(
           owner_instance_id: owner.node_name,
-          owner_instance_boot_id: owner.boot_id
+          owner_instance_boot_id: lease_boot_id
         )
         |> Repo.update!()
 
       expired_lease
       |> Ecto.Changeset.change(
         owner_instance_id: owner.node_name,
-        owner_instance_boot_id: owner.boot_id
+        owner_instance_boot_id: lease_boot_id
       )
       |> Repo.update!()
 
-      if unquote(execution_state) in [:dead, :scanner_first, :entitled] do
+      if unquote(execution_state) in [:dead, :scanner_first, :entitled, :unpublished] do
         monitor = TestProcess.monitor_flushed(pid)
         send(starter, :finish)
         assert_receive {:DOWN, ^monitor, :process, ^pid, :normal}, 15_000
-        CodexPooler.ExecutionProofSupport.publish_terminal!(attempt)
+        unless unquote(execution_state) == :unpublished, do: CodexPooler.ExecutionProofSupport.publish_terminal!(attempt)
       end
 
       attempt =
-        if unquote(execution_state) == :unknown do
-          attempt
-          |> Ecto.Changeset.change(owner_execution_id: Ecto.UUID.generate())
-          |> Repo.update!()
-        else
-          attempt
+        case unquote(execution_state) do
+          :unknown -> attempt |> Ecto.Changeset.change(owner_execution_id: Ecto.UUID.generate()) |> Repo.update!()
+          :legacy -> attempt |> Ecto.Changeset.change(owner_execution_id: nil, owner_process_id: nil, owner_instance_boot_id: nil) |> Repo.update!()
+          _ -> attempt
         end
 
-      assert ExecutionIdentity.status(attempt) ==
-               if(unquote(execution_state) in [:scanner_first, :entitled],
-                 do: :dead,
-                 else: unquote(execution_state)
-               )
+      expected_execution_status =
+        case unquote(execution_state) do
+          state when state in [:scanner_first, :entitled, :unpublished] -> :dead
+          :alive_dead_owner -> :alive
+          :legacy -> :unknown
+          state -> state
+        end
+
+      assert ExecutionIdentity.status(attempt) == expected_execution_status
 
       expected_code =
         case unquote(execution_state) do
@@ -381,46 +372,57 @@ defmodule CodexPooler.RuntimeStateCleanupTest do
                  )
       end
 
-      assert {:ok, summary} = RuntimeCleanup.cleanup_expired_runtime_state(now)
+      if unquote(execution_state) in [:alive, :unknown, :unpublished, :alive_dead_owner, :legacy] do
+        assert {:error, {:runtime_cleanup_failed, [{:owner_recovery, _}]}, summary} = RuntimeCleanup.cleanup_expired_runtime_state(now)
+        assert summary.expired_owner_sessions_recovered == 0
+        assert summary.expired_owner_leases == 0
+        assert Repo.reload!(request).status == "in_progress"
+        assert Repo.reload!(attempt).status == "in_progress"
+        assert Repo.reload!(turn).status == "in_progress"
+        assert Repo.reload!(expired_lease).status == "active"
+        assert Enum.map(ledger_entries_for_request(request.id), & &1.entry_kind) == ["reservation"]
+      else
+        assert {:ok, summary} = RuntimeCleanup.cleanup_expired_runtime_state(now)
 
-      assert summary.expired_owner_sessions_recovered ==
-               if(unquote(execution_state) == :scanner_first, do: 0, else: 1)
+        assert summary.expired_owner_sessions_recovered ==
+                 if(unquote(execution_state) == :scanner_first, do: 0, else: 1)
 
-      assert summary.expired_owner_leases == 1
+        assert summary.expired_owner_leases == 1
 
-      assert %Request{
-               status: "failed",
-               usage_status: "usage_unknown",
-               response_status_code: 499,
-               last_error_code: ^expected_code
-             } = Repo.reload!(request)
+        assert %Request{
+                 status: "failed",
+                 usage_status: "usage_unknown",
+                 response_status_code: 499,
+                 last_error_code: ^expected_code
+               } = Repo.reload!(request)
 
-      assert %Attempt{
-               status: ^expected_attempt_status,
-               usage_status: "usage_unknown",
-               network_error_code: ^expected_attempt_code
-             } = Repo.reload!(attempt)
+        assert %Attempt{
+                 status: ^expected_attempt_status,
+                 usage_status: "usage_unknown",
+                 network_error_code: ^expected_attempt_code
+               } = Repo.reload!(attempt)
 
-      expected_turn_status =
-        if unquote(execution_state) == :entitled, do: "failed", else: "interrupted"
+        expected_turn_status =
+          if unquote(execution_state) == :entitled, do: "failed", else: "interrupted"
 
-      assert %CodexTurn{status: ^expected_turn_status, error_code: ^expected_code} =
-               Repo.reload!(turn)
+        assert %CodexTurn{status: ^expected_turn_status, error_code: ^expected_code} =
+                 Repo.reload!(turn)
 
-      assert Repo.reload!(expired_lease).status == "expired"
+        assert Repo.reload!(expired_lease).status == "expired"
 
-      assert {:ok, :noop} =
-               RequestLifecycle.recover_dead_execution(
-                 request,
-                 attempt,
-                 now
-               )
+        assert {:ok, :noop} =
+                 RequestLifecycle.recover_dead_execution(
+                   request,
+                   attempt,
+                   now
+                 )
 
-      assert Enum.map(ledger_entries_for_request(request.id), & &1.entry_kind) |> Enum.sort() == [
-               "release",
-               "reservation",
-               "settlement"
-             ]
+        assert Enum.map(ledger_entries_for_request(request.id), & &1.entry_kind) |> Enum.sort() == [
+                 "release",
+                 "reservation",
+                 "settlement"
+               ]
+      end
     end
   end
 

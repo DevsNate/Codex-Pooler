@@ -11,7 +11,7 @@ defmodule CodexPooler.Gateway.Websocket.DirectCleanup do
 
   @task_receipt_key {__MODULE__, :task_receipt}
   @enforce_keys [:registry, :task, :ref, :parent, :session_id]
-  defstruct @enforce_keys ++ [:before_ready, :owner_binding, :owner_pid]
+  defstruct @enforce_keys ++ [:before_ready, :owner_binding, :owner_pid, :session_owner_lease_token]
 
   @type t :: %__MODULE__{
           registry: GenServer.server(),
@@ -19,6 +19,7 @@ defmodule CodexPooler.Gateway.Websocket.DirectCleanup do
           ref: reference(),
           parent: pid(),
           session_id: Ecto.UUID.t(),
+          session_owner_lease_token: Ecto.UUID.t() | nil,
           owner_binding: owner_binding() | nil,
           owner_pid: pid() | nil,
           before_ready: (-> term()) | nil
@@ -34,6 +35,7 @@ defmodule CodexPooler.Gateway.Websocket.DirectCleanup do
           required(:correlation_id) => String.t(),
           required(:api_key_id) => Ecto.UUID.t(),
           optional(:owner_binding) => owner_binding() | nil,
+          optional(:session_owner_lease_token) => Ecto.UUID.t() | nil,
           optional(:attempt_id) => Ecto.UUID.t(),
           optional(:replay_generation) => non_neg_integer(),
           optional(:cancel_reason) => String.t()
@@ -149,6 +151,7 @@ defmodule CodexPooler.Gateway.Websocket.DirectCleanup do
       request_id: request.id,
       correlation_id: request.correlation_id,
       api_key_id: request.api_key_id,
+      session_owner_lease_token: context.session_owner_lease_token,
       owner_binding: context.owner_binding
     }
   end

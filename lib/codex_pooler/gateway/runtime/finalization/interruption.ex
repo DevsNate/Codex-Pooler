@@ -161,8 +161,8 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Interruption do
           request = mark_pre_attempt_owner_drain(request, receipt, reason)
           interrupt_direct_locked(:session, session, request, reason, held_request_id)
 
-        :matched_superseded ->
-          log_direct_interrupt_superseded(receipt, reason)
+        {:matched_superseded, scope_reason} ->
+          log_direct_interrupt_superseded(receipt, reason, scope_reason)
           request = mark_pre_attempt_owner_drain(request, receipt, reason)
           interrupt_direct_locked(:request, session, request, reason, held_request_id)
 
@@ -258,11 +258,21 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Interruption do
   # nothing either way.
   defp admitted_direct_interrupt_scope(session, request, receipt) do
     with :matched <- pre_attempt_owner_clause(session, request, receipt) do
-      if replacement_turn_active?(receipt.session_id, receipt.request_id),
-        do: :matched_superseded,
-        else: :matched
+      cond do
+        direct_lease_replaced?(session, receipt) -> {:matched_superseded, :replacement_lease}
+        replacement_turn_active?(receipt.session_id, receipt.request_id) -> {:matched_superseded, :replacement_turn_active}
+        true -> :matched
+      end
     end
   end
+
+  # A direct socket carries the token it acquired even when another socket
+  # replaces the lease without starting a turn. Its own request still needs
+  # settlement, but the replacement session must keep its status and deadline.
+  defp direct_lease_replaced?(session, %{owner_binding: nil, session_owner_lease_token: token}) when is_binary(token),
+    do: session.owner_lease_token != token
+
+  defp direct_lease_replaced?(_session, _receipt), do: false
 
   defp pre_attempt_owner_clause(
          session,
@@ -364,13 +374,13 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Interruption do
   # so it does not belong in the gate's refusal line, and it is the only record
   # that this request settled while its session kept serving a successor. Every
   # value is a trusted internal correlator or a fixed internal token.
-  defp log_direct_interrupt_superseded(receipt, reason) do
+  defp log_direct_interrupt_superseded(receipt, reason, scope_reason) do
     Logger.debug(
       "websocket direct interrupt narrowed to the request " <>
         "codex_session_id=#{safe_log_value(Map.get(receipt, :session_id))} " <>
         "request_id=#{safe_log_value(Map.get(receipt, :request_id))} " <>
         "interrupt_reason=#{safe_log_value(reason)} " <>
-        "interrupt_scope=replacement_turn_active"
+        "interrupt_scope=#{scope_reason}"
     )
 
     :ok
@@ -808,10 +818,19 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Interruption do
     attempt = Repo.one(from a in Attempt, where: a.request_id == ^request.id, order_by: [desc: a.attempt_number], limit: 1)
     marked_attempt? = Repo.all(from a in Attempt, where: a.request_id == ^request.id, select: a.response_metadata) |> Enum.any?(&Map.has_key?(&1 || %{}, "expired_owner_stop"))
 
-    marked_attempt? or (not is_nil(attempt) and attempt.transport == "websocket" and Map.has_key?(request.request_metadata || %{}, "websocket_owner_forwarding"))
+    marked_attempt? or websocket_expiry_stop_required?(request, attempt)
   end
 
-  defp validate_sql_only_expiry!(session, %{sql_only_expiry: true}) do
+  defp websocket_expiry_stop_required?(request, %Attempt{transport: "websocket"} = attempt) do
+    # Lease expiry does not prove that a direct executor stopped streaming.
+    # Reuse durable execution authority, including the locked revalidation.
+    Map.has_key?(request.request_metadata || %{}, "websocket_owner_forwarding") or
+      Accounting.RequestLifecycle.execution_recovery_authority(attempt) not in [:terminal, :absent]
+  end
+
+  defp websocket_expiry_stop_required?(_request, _attempt), do: false
+
+  defp validate_sql_only_expiry!(session, %{sql_only_expiry: mode}) when mode in [true, :direct_execution] do
     Access.lock_api_key_for_read(session.api_key_id)
 
     active_expiry_requests(session.id)
@@ -819,7 +838,8 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Interruption do
       request = Repo.one!(from r in Request, where: r.id == ^request.id, lock: "FOR UPDATE")
       Repo.all(from t in CodexTurn, where: t.request_id == ^request.id and t.codex_session_id == ^session.id, order_by: [asc: t.id], lock: "FOR UPDATE")
       Repo.all(from a in Attempt, where: a.request_id == ^request.id, order_by: [asc: a.attempt_number], lock: "FOR UPDATE")
-      if request_needs_physical_expiry_stop?(request), do: Repo.rollback(:owner_unavailable)
+      forwarded? = Map.has_key?(request.request_metadata || %{}, "websocket_owner_forwarding")
+      if (mode == true or not forwarded?) and request_needs_physical_expiry_stop?(request), do: Repo.rollback(:owner_unavailable)
     end)
   end
 

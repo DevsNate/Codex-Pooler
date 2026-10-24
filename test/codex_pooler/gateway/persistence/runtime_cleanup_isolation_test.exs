@@ -128,7 +128,8 @@ defmodule CodexPooler.Gateway.Persistence.RuntimeCleanupIsolationTest do
 
   defp require_physical_stop(fixture) do
     request = fixture.request |> Ecto.Changeset.change(request_metadata: Map.put(fixture.request.request_metadata, "websocket_owner_forwarding", %{})) |> Repo.update!()
-    %{fixture | request: request}
+    attempt = fixture.attempt |> Ecto.Changeset.change(owner_execution_id: Ecto.UUID.generate()) |> Repo.update!()
+    %{fixture | request: request, attempt: attempt}
   end
 
   defp assert_unchanged(fixture) do
@@ -137,7 +138,7 @@ defmodule CodexPooler.Gateway.Persistence.RuntimeCleanupIsolationTest do
 
   defp assert_recovered(fixture) do
     assert Repo.reload!(fixture.request).status == "failed"
-    assert Repo.reload!(fixture.request).last_error_code == "owner_unavailable"
+    assert Repo.reload!(fixture.request).last_error_code == if(fixture.attempt, do: "dead_execution_recovered", else: "owner_unavailable")
     assert Repo.reload!(fixture.turn).status == "interrupted"
     assert Repo.reload!(fixture.lease).status == "expired"
     assert Repo.reload!(fixture.session).status == "interrupted"
@@ -163,7 +164,7 @@ defmodule CodexPooler.Gateway.Persistence.RuntimeCleanupIsolationTest do
     lease = lease_fixture(session, assignment, expired_at)
 
     request = request_fixture(%{pool: pool, api_key: api_key}, %{model_id: model.id, requested_model: model.exposed_model_id, transport: "websocket", status: "in_progress", usage_status: "usage_pending", completed_at: nil, response_status_code: nil, request_metadata: %{"codex_session_id" => session.id}})
-    attempt = if !opts[:no_attempt], do: attempt_fixture(request, assignment, %{status: "in_progress", completed_at: nil, usage_status: "usage_pending", response_metadata: %{}})
+    attempt = if !opts[:no_attempt], do: ended_attempt_fixture(request, assignment)
     attempt_id = if attempt, do: attempt.id
     turn = Repo.insert!(%CodexTurn{codex_session_id: session.id, request_id: request.id, turn_sequence: 1, transport_kind: "websocket", final_attempt_id: attempt_id, status: "in_progress", started_at: expired_at, created_at: expired_at, updated_at: expired_at})
 
@@ -172,7 +173,17 @@ defmodule CodexPooler.Gateway.Persistence.RuntimeCleanupIsolationTest do
     |> Ecto.Changeset.change(source_event_id: "request:#{request.id}:reservation")
     |> Repo.update!()
 
-    %{pool: pool, api_key: api_key, assignment: assignment, request: request, attempt: attempt, session: session, lease: lease, turn: turn}
+    %{pool: pool, api_key: api_key, assignment: assignment, request: Repo.reload!(request), attempt: attempt, session: session, lease: lease, turn: turn}
+  end
+
+  defp ended_attempt_fixture(request, assignment) do
+    task = Task.async(fn -> receive do: (:create -> CodexPooler.Accounting.create_attempt(request, assignment)) end)
+    monitor = Process.monitor(task.pid)
+    send(task.pid, :create)
+    assert {:ok, attempt} = Task.await(task, 15_000)
+    assert_receive {:DOWN, ^monitor, :process, _, :normal}, 15_000
+    CodexPooler.ExecutionProofSupport.publish_terminal!(attempt)
+    attempt
   end
 
   defp ttl_fixture(fixture, now) do

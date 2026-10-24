@@ -434,6 +434,7 @@ defmodule CodexPooler.Gateway.Persistence.RuntimeCleanup do
   defp recover_expired_owner_session(candidate, {:ok, recovered_count}) do
     result =
       cond do
+        not expired_owner_candidate_current?(candidate) -> {:ok, {0, %{interrupted_outcomes: []}}}
         not Interruption.physical_expiry_stop_required?(candidate.session_id) -> recover_expired_persistence(Map.put(candidate, :sql_only_expiry, true))
         Repo.in_transaction?() -> {:error, :caller_transaction}
         expired_owner_proven_gone?(candidate) -> recover_proven_gone_owner(candidate)
@@ -444,6 +445,10 @@ defmodule CodexPooler.Gateway.Persistence.RuntimeCleanup do
   end
 
   defp recover_expired_persistence(candidate), do: Repo.transaction(fn -> recover_expired_owner_session_locked(candidate) end)
+
+  defp expired_owner_candidate_current?(candidate) do
+    Repo.exists?(from s in CodexSession, where: s.id == ^candidate.session_id and s.owner_instance_id == ^candidate.owner_instance_id and fragment("? IS NOT DISTINCT FROM ?", s.owner_instance_boot_id, ^candidate.owner_instance_boot_id) and s.owner_lease_token == ^candidate.owner_lease_token and s.owner_lease_expires_at == ^candidate.owner_lease_expires_at)
+  end
 
   defp recover_proven_gone_owner(candidate) do
     attempt = Repo.one(from t in CodexTurn, join: a in CodexPooler.Accounting.Attempt, on: a.request_id == t.request_id, where: t.codex_session_id == ^candidate.session_id and t.status == "in_progress", order_by: [desc: t.turn_sequence, desc: a.attempt_number], limit: 1, select: a)
@@ -462,7 +467,8 @@ defmodule CodexPooler.Gateway.Persistence.RuntimeCleanup do
         end
 
       :none ->
-        recover_expired_persistence(candidate)
+        # A dead lease owner does not prove a separate direct executor died.
+        recover_expired_persistence(Map.put(candidate, :sql_only_expiry, :direct_execution))
 
       _unconfirmed ->
         {:error, :owner_unavailable}

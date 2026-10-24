@@ -13,6 +13,7 @@ defmodule CodexPooler.Gateway.Websocket do
   alias CodexPooler.Gateway.Routing.CandidateEligibility
   alias CodexPooler.Gateway.Runtime.Finalization.Interruption
   alias CodexPooler.Gateway.Runtime.Service
+  alias CodexPooler.Gateway.Runtime.SessionLeaseHeartbeat
   alias CodexPooler.Gateway.Transports.Admission
   alias CodexPooler.Gateway.Transports.Streaming.{PreparedWebsocketFrame, WebsocketCodec}
 
@@ -106,6 +107,21 @@ defmodule CodexPooler.Gateway.Websocket do
     with {:ok, session} <- start_codex_session(auth, opts),
          {:ok, upstream_websocket_session} <- UpstreamWebsocketSession.start_link(local_upstream_session_options(opts)) do
       {:ok, %{codex_session: session, upstream_websocket_session: upstream_websocket_session}}
+    end
+  end
+
+  @spec start_websocket_session_heartbeat(CodexSession.t(), opts()) :: {:ok, pid()} | {:error, term()}
+  def start_websocket_session_heartbeat(%CodexSession{} = session, opts) do
+    with {:ok, witness} <- OwnerWitness.new(session) do
+      opts
+      |> RequestOptions.for_websocket()
+      |> RequestOptions.put_continuity(codex_session: session, owner_instance_id: session.owner_instance_id, owner_instance_boot_id: session.owner_instance_boot_id)
+      |> RequestOptions.put_session_owner_witness(witness)
+      |> SessionLeaseHeartbeat.start_websocket()
+      |> case do
+        :ignore -> {:error, :owner_unavailable}
+        result -> result
+      end
     end
   end
 

@@ -133,6 +133,24 @@ defmodule CodexPoolerWeb.CodexResponsesSocketTest do
     assert final_state.api_key_runtime_epoch == 7
   end
 
+  test "closes a local socket when its session lease heartbeat exits" do
+    heartbeat_monitor = make_ref()
+
+    state =
+      api_key_socket_state(Ecto.UUID.generate(), Ecto.UUID.generate(), 0, %{
+        session_lease_heartbeat: self(),
+        session_lease_heartbeat_monitor: heartbeat_monitor
+      })
+
+    assert {:stop, :normal, {1011, "websocket session lease unavailable"}, closed_state} =
+             CodexResponsesSocket.handle_info(
+               {:DOWN, heartbeat_monitor, :process, self(), :normal},
+               state
+             )
+
+    assert closed_state.socket_stopped?
+  end
+
   test "epoch-less legacy pause re-reads durable authorization and ignores delayed post-resume event" do
     setup = active_api_key_fixture()
     scope = fixture_owner_scope()

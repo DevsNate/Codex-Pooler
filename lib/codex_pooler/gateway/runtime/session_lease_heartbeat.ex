@@ -38,14 +38,26 @@ defmodule CodexPooler.Gateway.Runtime.SessionLeaseHeartbeat do
     :test_observer
   ]
 
-  @type result :: {:ok, pid()} | :ignore
+  @type result :: {:ok, pid()} | :ignore | {:error, term()}
 
   @spec start(RequestOptions.t()) :: result()
   def start(%RequestOptions{} = request_options), do: start(request_options, [])
 
   @spec start(RequestOptions.t(), keyword()) :: result()
   def start(%RequestOptions{} = request_options, opts) when is_list(opts) do
-    case lifecycle(request_options, opts) do
+    start_lifecycle(request_options, opts, @http_transports)
+  end
+
+  # Socket-owned renewal is scheduled only. Request-scoped run/2 must keep
+  # excluding websockets: its synchronous HTTP takeover would replace the
+  # token still held by the socket and its upstream connection.
+  @spec start_websocket(RequestOptions.t()) :: result()
+  def start_websocket(%RequestOptions{} = request_options) do
+    start_lifecycle(request_options, [], ["websocket"])
+  end
+
+  defp start_lifecycle(request_options, opts, transports) do
+    case lifecycle(request_options, opts, transports) do
       {:ok, lifecycle} -> GenServer.start(__MODULE__, lifecycle)
       :ignore -> :ignore
     end
@@ -292,11 +304,11 @@ defmodule CodexPooler.Gateway.Runtime.SessionLeaseHeartbeat do
     end
   end
 
-  defp lifecycle(%RequestOptions{} = request_options, opts) do
+  defp lifecycle(%RequestOptions{} = request_options, opts, transports) do
     with %CodexSession{id: session_id} <- request_options.continuity.codex_session,
          %OwnerWitness{session_id: ^session_id, lease_token: owner_lease_token} <-
            request_options.runtime.session_owner_witness,
-         transport when transport in @http_transports <- request_options.transport.transport,
+         true <- request_options.transport.transport in transports,
          true <- is_pid(Keyword.get(opts, :caller, self())) do
       ttl_seconds = ttl_seconds(opts, request_options)
       renewal_interval_ms = renewal_interval_ms(opts)

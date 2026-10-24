@@ -508,13 +508,17 @@ defmodule CodexPooler.Gateway.Persistence.SameKeyExpiredOwnerRecoveryTest do
         request_metadata: %{"codex_session_id" => session.id}
       })
 
-    attempt =
-      attempt_fixture(request, assignment, %{
-        status: "in_progress",
-        completed_at: nil,
-        usage_status: "usage_pending",
-        response_metadata: %{}
-      })
+    task = Task.async(fn -> receive do: (:create -> CodexPooler.Accounting.create_attempt(request, assignment)) end)
+    monitor = Process.monitor(task.pid)
+    send(task.pid, :create)
+    assert {:ok, attempt} = Task.await(task, @budget)
+    assert_receive {:DOWN, ^monitor, :process, _, :normal}, @budget
+
+    if transport == "websocket" do
+      if options[:committed],
+        do: CodexPooler.ExecutionProofSupport.publish_committed_terminal!(attempt),
+        else: CodexPooler.ExecutionProofSupport.publish_terminal!(attempt)
+    end
 
     turn = insert_turn!(session, request, attempt)
 
