@@ -72,7 +72,7 @@ defmodule CodexPooler.MixProject do
       {:oban, "== 2.24.2"},
       {:phoenix_live_dashboard, "== 0.9.1", only: :dev},
       {:esbuild, "== 0.10.1", runtime: Mix.env() == :dev},
-      {:tailwind, "== 0.5.1", runtime: Mix.env() == :dev},
+      {:tailwind, "== 0.5.2", runtime: Mix.env() == :dev},
       {:heroicons, github: "tailwindlabs/heroicons", tag: "v2.2.0", sparse: "optimized", app: false, compile: false, depth: 1},
       {:swoosh, "== 1.29.0"},
       {:gen_smtp, "== 1.3.0"},
