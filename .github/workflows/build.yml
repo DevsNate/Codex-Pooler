@@ -6,6 +6,7 @@ on:
       - '*'
   workflow_run:
     workflows: [Development]
+    branches: [main]
     types: [completed]
   release:
     types: [published]
@@ -20,6 +21,11 @@ permissions:
   contents: write
   packages: write
   actions: read
+
+concurrency:
+  group: release-image-publication
+  queue: max
+  cancel-in-progress: false
 
 jobs:
   select:
@@ -208,11 +214,6 @@ jobs:
     needs: [select, image]
     if: ${{ !cancelled() && needs.select.result == 'success' && needs.select.outputs.ready == 'true' && (needs.image.result == 'success' || needs.image.result == 'skipped') }}
     runs-on: ubuntu-26.04
-    concurrency:
-      group: release-image-publication
-      queue: max
-      cancel-in-progress: false
-
     steps:
       - name: Checkout publication coordinator
         uses: actions/checkout@v7

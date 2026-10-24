@@ -41,14 +41,14 @@ test("development only receives branch pushes and excludes both release automati
 		triggers,
 		/pull_request|workflow_dispatch|workflow_run|repository_dispatch|tags:/,
 	);
-	assert.doesNotMatch(
-		workflow,
-		/continue-on-error:\s*true|cancel-in-progress:\s*true/,
+	assert.doesNotMatch(workflow, /continue-on-error:\s*true/);
+	assert.ok(
+		workflow.includes(
+			`group: "development-\${{ github.ref }}-\${{ github.ref == 'refs/heads/main' && startsWith(github.event.head_commit.message, 'chore(main): release codex-pooler ') && github.sha || 'latest' }}"`,
+		),
 	);
-	assert.match(
-		workflow,
-		/group: development-\$\{\{ github\.ref \}\}\n\s+queue: max\n\s+cancel-in-progress: false/,
-	);
+	assert.match(workflow, /cancel-in-progress: true/);
+	assert.doesNotMatch(workflow, /queue: max/);
 });
 
 test("the canonical workflow distributes complete quality across hosted jobs before publication", () => {

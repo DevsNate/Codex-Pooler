@@ -11,9 +11,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: development-${{ github.ref }}
-  queue: max
-  cancel-in-progress: false
+  group: "development-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && startsWith(github.event.head_commit.message, 'chore(main): release codex-pooler ') && github.sha || 'latest' }}"
+  cancel-in-progress: true
 
 jobs:
   tools:

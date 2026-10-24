@@ -31,7 +31,7 @@ const script = (name) =>
 test("publication wakes on Development completion and rechecks live Actions evidence inside promotion", () => {
 	assert.match(
 		workflow,
-		/workflow_run:\n\s+workflows: \[Development\]\n\s+types: \[completed\]/,
+		/workflow_run:\n\s+workflows: \[Development\]\n\s+branches: \[main\]\n\s+types: \[completed\]/,
 	);
 	assert.match(workflow, /actions: read/);
 	assert.doesNotMatch(
@@ -88,6 +88,7 @@ test("publication queues every pending release and recovery steps also run for r
 		workflow,
 		/group: release-image-publication\n\s+queue: max\n\s+cancel-in-progress: false/,
 	);
+	assert.ok(workflow.indexOf("concurrency:") < workflow.indexOf("jobs:"));
 	for (const name of ["Prepare release assets", "Upload release assets"]) {
 		assert.match(
 			step(name),
@@ -122,8 +123,7 @@ test("each platform is built natively and only the publish job tags the merged i
 	);
 	assert.doesNotMatch(build, /\n\s+tags:/, "a platform image is never tagged");
 	assert.match(workflow, / {2}publish:\n {4}needs: \[select, image\]\n/);
-	const publish = workflow.slice(workflow.indexOf("  publish:\n"));
-	assert.match(publish, /group: release-image-publication\n\s+queue: max/);
+	assert.equal((workflow.match(/concurrency:/g) ?? []).length, 1);
 	assert.doesNotMatch(
 		workflow.slice(0, workflow.indexOf("  publish:\n")),
 		/imagetools create/,
