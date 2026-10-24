@@ -15,6 +15,12 @@ esac
 registry=registry.icorete.ch
 image="$registry/icoretech/codex-pooler"
 source_url=https://github.com/icoretech/codex-pooler
+current_main_revision() {
+  local remote pattern=$'^[0-9a-f]{40}\trefs/heads/main$'
+  remote=$(GIT_TERMINAL_PROMPT=0 git ls-remote --exit-code "$source_url" refs/heads/main) || fail 'cannot resolve current main revision'
+  [[ $remote =~ $pattern ]] || fail 'invalid current main revision'
+  printf '%s\n' "${remote%%$'\t'*}"
+}
 rehearsal=false
 content_hash=''
 source_kind=commit
@@ -174,7 +180,13 @@ else
   branch=$(printf '%s' "$branch" | LC_ALL=C tr '[:upper:]_' '[:lower:]-' | LC_ALL=C sed 's/[^a-z0-9.-]/-/g; s/^[.-]*//')
   branch=${branch:-branch}
 fi
+# Freeze tag ordering before checking main; a stale run remains build-only.
 suffix="-${revision:0:8}-$(date +%s)"
+publish_eligible=false
+if [[ $rehearsal == false && ${GITHUB_REF:-} == refs/heads/main ]]; then
+  main_revision=$(current_main_revision)
+  [[ $main_revision != "$revision" ]] || publish_eligible=true
+fi
 branch=${branch:0:$((128 - ${#suffix}))}
 tag="$branch$suffix"
 printf '%s\n' "$tag" > "$state/tag"
@@ -209,7 +221,11 @@ fi
 
 published=false
 digest=''
-if [[ $rehearsal == false && ${GITHUB_REF:-} == refs/heads/main ]]; then
+if [[ $publish_eligible == true ]]; then
+  main_revision=$(current_main_revision)
+  [[ $main_revision == "$revision" ]] || publish_eligible=false
+fi
+if [[ $publish_eligible == true ]]; then
   printf '%s' "$ICORETECH_REGISTRY_PASSWORD" | docker login "$registry" --username "$ICORETECH_REGISTRY_USER" --password-stdin
   unset ICORETECH_REGISTRY_PASSWORD
   : > "$evidence/image-push.log"

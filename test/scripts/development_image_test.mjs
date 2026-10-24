@@ -56,6 +56,14 @@ function fixture(t, overrides = {}) {
 	git(["add", "."]);
 	git(["commit", "-qm", "fixture"]);
 	const sha = git(["rev-parse", "HEAD"]);
+	const remote = join(root, "remote.git");
+	git(["init", "--bare", "-q", remote]);
+	git(["push", "--quiet", remote, `${sha}:refs/heads/main`]);
+	git([
+		"config",
+		`url.${remote}.insteadOf`,
+		"https://github.com/icoretech/codex-pooler",
+	]);
 	writeFileSync(join(repo, "payload"), "uncommitted payload\n");
 	writeFileSync(join(repo, ".env"), "PRIVATE_FIXTURE=value\n");
 	writeFileSync(join(repo, "untracked"), "not part of the revision\n");
@@ -108,6 +116,8 @@ else if (args[0] === 'buildx' && args[1] === 'build') {
     fs.writeFileSync(path.join(output,'blobs','fresh-layer'),'exported layer');
   }
   fs.writeFileSync(present, 'built');
+  if (env.FIXTURE_MAIN_AFTER_BUILD) require('node:child_process').execFileSync('git', ['push', '--quiet', env.FIXTURE_SOURCE_REMOTE, env.FIXTURE_MAIN_AFTER_BUILD + ':refs/heads/main']);
+  if (env.FIXTURE_REMOVE_REMOTE_AFTER_BUILD === '1') fs.rmSync(env.FIXTURE_SOURCE_REMOTE, {recursive: true});
   console.log('fixture build complete');
 } else if (args[0] === 'image' && args[1] === 'inspect') {
   if (!fs.existsSync(present)) process.exit(1);
@@ -143,6 +153,7 @@ else if (args[0] === 'buildx' && args[1] === 'build') {
 		RUNNER_ARCH: "X64",
 		RUNNER_TEMP: temporary,
 		FIXTURE_ROOT: root,
+		FIXTURE_SOURCE_REMOTE: remote,
 		FIXTURE_PASSWORD: "sample-password",
 		...overrides,
 	};
@@ -173,6 +184,8 @@ else if (args[0] === 'buildx' && args[1] === 'build') {
 		repo,
 		env,
 		sha,
+		git,
+		remote,
 		state: join(temporary, "codex-pooler-image-123-2"),
 		evidence: join(repo, "tmp/ci-results/github-123-2"),
 		run: (mode = "run", cwd = repo) =>
@@ -289,6 +302,64 @@ test("only main publishes and verifies the registry digest and source labels", (
 	assert.equal(existsSync(f.state), false);
 	assert.equal(readFileSync(join(sibling, "keep"), "utf8"), "unrelated");
 });
+
+for (const timing of ["before", "during"]) {
+	test(`main superseded ${timing} the build verifies its image without publishing`, (t) => {
+		const f = fixture(t, {
+			GITHUB_REF: "refs/heads/main",
+			ICORETECH_REGISTRY_USER: "sample-user",
+			ICORETECH_REGISTRY_PASSWORD: "sample-password",
+		});
+		const next = f.git([
+			"commit-tree",
+			`${f.sha}^{tree}`,
+			"-p",
+			f.sha,
+			"-m",
+			"next revision",
+		]);
+		if (timing === "before")
+			f.git(["push", "--quiet", f.remote, `${next}:refs/heads/main`]);
+		else f.env.FIXTURE_MAIN_AFTER_BUILD = next;
+
+		const result = f.run();
+
+		assert.equal(result.status, 0, result.stderr);
+		const receipt = JSON.parse(readFileSync(join(f.evidence, "image.json")));
+		assert.equal(receipt.revision, f.sha);
+		assert.equal(receipt.published, false);
+		assert.equal(receipt.digest, "");
+		assert.equal(f.calls().filter(({ args }) => args[1] === "build").length, 1);
+		assert.equal(
+			f.calls().some(({ args }) => ["push", "login"].includes(args[0])),
+			false,
+		);
+		assert.equal(existsSync(f.state), false);
+	});
+}
+
+for (const timing of ["before", "during"]) {
+	test(`an unavailable main remote ${timing} the build fails without publishing`, (t) => {
+		const f = fixture(t, {
+			GITHUB_REF: "refs/heads/main",
+			ICORETECH_REGISTRY_USER: "sample-user",
+			ICORETECH_REGISTRY_PASSWORD: "sample-password",
+		});
+		if (timing === "before") rmSync(f.remote, { recursive: true });
+		else f.env.FIXTURE_REMOVE_REMOTE_AFTER_BUILD = "1";
+
+		const result = f.run();
+
+		assert.equal(result.status, 1, result.stderr);
+		assert.match(result.stderr, /cannot resolve current main revision/);
+		assert.equal(
+			f.calls().some(({ args }) => ["push", "login"].includes(args[0])),
+			false,
+		);
+		assert.equal(existsSync(join(f.evidence, "image.json")), false);
+		assert.equal(existsSync(f.state), false);
+	});
+}
 
 function hostedCache(f, warm = false) {
 	const cache = join(f.env.RUNNER_TEMP, "pooler-image-cache");
@@ -719,6 +790,7 @@ test("rehearsal cannot publish even with inherited main-run credentials", (t) =>
 		GITHUB_TOKEN: "sample-token",
 		GH_TOKEN: "sample-token",
 	});
+	rmSync(f.remote, { recursive: true });
 	const result = f.run("rehearse");
 	assert.equal(result.status, 0, result.stderr);
 	assert.equal(
